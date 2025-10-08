@@ -38,7 +38,8 @@ cursor.execute(
 cursor.execute("PRAGMA table_info(faces)")
 cols = {row[1] for row in cursor.fetchall()}
 if "created_at" not in cols:
-    cursor.execute("ALTER TABLE faces ADD COLUMN created_at TEXT DEFAULT (datetime('now'))")
+    cursor.execute("ALTER TABLE faces ADD COLUMN created_at TEXT")
+    cursor.execute("UPDATE faces SET created_at = datetime('now') WHERE created_at IS NULL")
 if "last_seen_at" not in cols:
     cursor.execute("ALTER TABLE faces ADD COLUMN last_seen_at TEXT")
 if "seen_count" not in cols:
