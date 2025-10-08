@@ -3,14 +3,25 @@ import dlib
 import numpy as np
 import sqlite3
 import time
+import os
 
 # Initialize face detector and shape predictor
 detector = dlib.get_frontal_face_detector()
-predictor = dlib.shape_predictor("models/shape_predictor_68_face_landmarks.dat")
-face_rec_model = dlib.face_recognition_model_v1("models/dlib_face_recognition_resnet_model_v1.dat")
 
-# Connect to SQLite database
-db_path = "database/faces.db"
+# Dynamically construct the paths relative to this file
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODELS_DIR = os.path.join(BASE_DIR, 'models')
+DB_DIR = os.path.join(BASE_DIR, 'database')
+os.makedirs(DB_DIR, exist_ok=True)
+
+predictor_path = os.path.join(MODELS_DIR, 'shape_predictor_68_face_landmarks.dat')
+predictor = dlib.shape_predictor(predictor_path)
+
+face_rec_model_path = os.path.join(MODELS_DIR, 'dlib_face_recognition_resnet_model_v1.dat')
+face_rec_model = dlib.face_recognition_model_v1(face_rec_model_path)
+
+# Connect to SQLite database (relative to this script)
+db_path = os.path.join(DB_DIR, 'faces.db')
 conn = sqlite3.connect(db_path)
 cursor = conn.cursor()
 
