@@ -41,7 +41,9 @@ def ensure_schema(connection):
     cur.execute("PRAGMA table_info(faces)")
     cols = {row[1] for row in cur.fetchall()}
     if "created_at" not in cols:
-        cur.execute("ALTER TABLE faces ADD COLUMN created_at TEXT DEFAULT (datetime('now'))")
+        # SQLite doesn't allow function defaults in ALTER; add column then backfill
+        cur.execute("ALTER TABLE faces ADD COLUMN created_at TEXT")
+        cur.execute("UPDATE faces SET created_at = datetime('now') WHERE created_at IS NULL")
     if "last_seen_at" not in cols:
         cur.execute("ALTER TABLE faces ADD COLUMN last_seen_at TEXT")
     if "seen_count" not in cols:
@@ -77,6 +79,7 @@ def recognize_face():
             recognized_id = None
             recognized_seen_count = None
             recognized_last_seen_at = None
+            recognized_last_seen_str = None
             min_distance = float("inf")
 
             for row in rows:
@@ -88,6 +91,7 @@ def recognize_face():
                     recognized_id = person_id
                     recognized_seen_count = db_seen_count
                     recognized_last_seen_at = db_last_seen_at
+                    recognized_last_seen_str = db_last_seen_at
                     min_distance = distance
 
             # Update last seen fields if recognized and cooldown passed
@@ -104,6 +108,7 @@ def recognize_face():
                     # Reflect updated values in UI variables
                     if recognized_seen_count is not None:
                         recognized_seen_count += 1
+                    recognized_last_seen_str = "now"
 
             # Draw rectangle and name
             x, y, w, h = (face.left(), face.top(), face.width(), face.height())
@@ -112,6 +117,10 @@ def recognize_face():
             if recognized_id is not None and recognized_seen_count is not None:
                 label = f"{recognized_name} (seen {recognized_seen_count})"
             cv2.putText(frame, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            # Draw last seen right below the name
+            if recognized_id is not None:
+                last_label = f"Last: {recognized_last_seen_str if recognized_last_seen_str else '—'}"
+                cv2.putText(frame, last_label, (x, y+15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
         cv2.imshow("Face Recognition", frame)
 
