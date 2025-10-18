@@ -56,9 +56,10 @@ def recognize_face():
     cap = cv2.VideoCapture(0)
     print("Press 'q' to quit.")
 
-    # Throttle DB writes so we don't update every frame
-    last_update = {}  # person_id -> last update ts
-    COOLDOWN_SEC = 5.0
+    # Session-based presence tracking: update only on absent -> present transitions
+    presence_state = {}  # person_id -> 'present' | 'absent'
+    last_detected_ts = {}  # person_id -> last timestamp this frame saw the person
+    ABSENCE_GRACE_SEC = 2.0  # require person to be missing for this long before marking absent
 
     while True:
         ret, frame = cap.read()
@@ -67,6 +68,8 @@ def recognize_face():
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         faces = detector(gray)
+
+        recognized_ids_in_frame = set()
 
         for face in faces:
             landmarks = predictor(gray, face)
@@ -94,21 +97,28 @@ def recognize_face():
                     recognized_last_seen_str = db_last_seen_at
                     min_distance = distance
 
-            # Update last seen fields if recognized and cooldown passed
+            # Presence tracking and DB updates only on absent -> present transition
             if recognized_id is not None:
-                now = time.time()
-                last = last_update.get(recognized_id, 0.0)
-                if now - last > COOLDOWN_SEC:
+                now_ts = time.time()
+                prev_state = presence_state.get(recognized_id, 'absent')
+                recognized_ids_in_frame.add(recognized_id)
+                last_detected_ts[recognized_id] = now_ts
+
+                if prev_state != 'present':
+                    # Transition: absent -> present (new entry)
                     cursor.execute(
                         "UPDATE faces SET last_seen_at = datetime('now'), seen_count = seen_count + 1 WHERE id = ?",
                         (recognized_id,),
                     )
                     conn.commit()
-                    last_update[recognized_id] = now
+                    presence_state[recognized_id] = 'present'
                     # Reflect updated values in UI variables
                     if recognized_seen_count is not None:
                         recognized_seen_count += 1
                     recognized_last_seen_str = "now"
+                else:
+                    # Still present in the same session; no DB update
+                    presence_state[recognized_id] = 'present'
 
             # Draw rectangle and name
             x, y, w, h = (face.left(), face.top(), face.width(), face.height())
@@ -121,6 +131,14 @@ def recognize_face():
             if recognized_id is not None:
                 last_label = f"Last: {recognized_last_seen_str if recognized_last_seen_str else '—'}"
                 cv2.putText(frame, last_label, (x, y+15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+        # Mark present -> absent when not seen for grace period
+        now_ts = time.time()
+        for pid, state in list(presence_state.items()):
+            if state == 'present' and pid not in recognized_ids_in_frame:
+                last_ts = last_detected_ts.get(pid)
+                if last_ts is not None and (now_ts - last_ts) > ABSENCE_GRACE_SEC:
+                    presence_state[pid] = 'absent'
 
         cv2.imshow("Face Recognition", frame)
 
