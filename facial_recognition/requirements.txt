@@ -1,3 +1,5 @@
 opencv-python
 dlib
 numpy==2.3.3
+# Optional: if you want to download/use the CNN face detector model (mmod) from dlib,
+# place 'mmod_human_face_detector.dat' into facial_recognition/models and set FACE_DETECTOR=cnn
