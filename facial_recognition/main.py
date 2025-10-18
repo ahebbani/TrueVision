@@ -52,6 +52,33 @@ def ensure_schema(connection):
 
 ensure_schema(conn)
 
+# Ensure secondary table for multiple embeddings per person and seed from existing data
+def ensure_embeddings_schema(connection):
+    cur = connection.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS face_embeddings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            face_id INTEGER NOT NULL,
+            embedding BLOB NOT NULL,
+            created_at TEXT NOT NULL,
+            quality REAL,
+            FOREIGN KEY(face_id) REFERENCES faces(id)
+        )
+        """
+    )
+    # Seed from faces.embedding for any face that doesn't yet have entries
+    cur.execute(
+        """
+        INSERT INTO face_embeddings (face_id, embedding, created_at)
+        SELECT id, embedding, datetime('now') FROM faces
+        WHERE embedding IS NOT NULL AND id NOT IN (SELECT face_id FROM face_embeddings)
+        """
+    )
+    connection.commit()
+
+ensure_embeddings_schema(conn)
+
 def recognize_face():
     cap = cv2.VideoCapture(0)
     print("Press 'q' to quit.")
@@ -60,6 +87,12 @@ def recognize_face():
     presence_state = {}  # person_id -> 'present' | 'absent'
     last_detected_ts = {}  # person_id -> last timestamp this frame saw the person
     ABSENCE_GRACE_SEC = 2.0  # require person to be missing for this long before marking absent
+
+    # Incremental sampling controls
+    last_added_ts = {}  # person_id -> last time we added a template
+    ADD_COOLDOWN_SEC = 5.0
+    DIVERSITY_MIN_DIST = 0.20  # require new sample to differ from all existing by at least this
+    QUALITY_MIN_VAR = 120.0    # blur threshold via variance of Laplacian
 
     while True:
         ret, frame = cap.read()
@@ -71,31 +104,44 @@ def recognize_face():
 
         recognized_ids_in_frame = set()
 
+        # Load all embeddings once per frame and prepare per-person collections
+        cursor.execute(
+            """
+            SELECT fe.face_id, f.name, fe.embedding, f.seen_count, f.last_seen_at
+            FROM face_embeddings fe
+            JOIN faces f ON f.id = fe.face_id
+            """
+        )
+        rows = cursor.fetchall()
+        embeddings_by_person = {}
+        meta_by_person = {}
+        for person_id, name, db_embedding, db_seen_count, db_last_seen_at in rows:
+            emb = np.frombuffer(db_embedding, dtype=np.float64)
+            embeddings_by_person.setdefault(person_id, []).append(emb)
+            # store last seen/meta: last one wins but values are same for a person in join
+            meta_by_person[person_id] = (name, db_seen_count, db_last_seen_at)
+
         for face in faces:
             landmarks = predictor(gray, face)
-            embedding = np.array(face_rec_model.compute_face_descriptor(frame, landmarks))
+            emb_live = np.array(face_rec_model.compute_face_descriptor(frame, landmarks))
 
-            # Compare with database (also read seen_count and last_seen_at for UI)
-            cursor.execute("SELECT id, name, embedding, seen_count, last_seen_at FROM faces")
-            rows = cursor.fetchall()
+            # Match to nearest template across all persons
             recognized_name = "Unknown"
             recognized_id = None
             recognized_seen_count = None
-            recognized_last_seen_at = None
             recognized_last_seen_str = None
             min_distance = float("inf")
 
-            for row in rows:
-                person_id, name, db_embedding, db_seen_count, db_last_seen_at = row
-                db_embedding = np.frombuffer(db_embedding, dtype=np.float64)
-                distance = np.linalg.norm(embedding - db_embedding)
-                if distance < 0.6 and distance < min_distance:  # Threshold = 0.6
-                    recognized_name = name
-                    recognized_id = person_id
-                    recognized_seen_count = db_seen_count
-                    recognized_last_seen_at = db_last_seen_at
-                    recognized_last_seen_str = db_last_seen_at
-                    min_distance = distance
+            for person_id, person_embs in embeddings_by_person.items():
+                for db_emb in person_embs:
+                    distance = np.linalg.norm(emb_live - db_emb)
+                    if distance < 0.6 and distance < min_distance:
+                        name, db_seen_count, db_last_seen_at = meta_by_person.get(person_id, ("Unknown", None, None))
+                        recognized_name = name
+                        recognized_id = person_id
+                        recognized_seen_count = db_seen_count
+                        recognized_last_seen_str = db_last_seen_at
+                        min_distance = distance
 
             # Presence tracking and DB updates only on absent -> present transition
             if recognized_id is not None:
@@ -112,22 +158,55 @@ def recognize_face():
                     )
                     conn.commit()
                     presence_state[recognized_id] = 'present'
-                    # Reflect updated values in UI variables
                     if recognized_seen_count is not None:
                         recognized_seen_count += 1
                     recognized_last_seen_str = "now"
                 else:
-                    # Still present in the same session; no DB update
                     presence_state[recognized_id] = 'present'
 
-            # Draw rectangle and name
+                # Consider adding this as a new template for diversity and quality
+                x, y, w, h = (face.left(), face.top(), face.width(), face.height())
+                x0, y0 = max(0, x), max(0, y)
+                x1, y1 = min(frame.shape[1], x + w), min(frame.shape[0], y + h)
+                face_gray = gray[y0:y1, x0:x1]
+                quality = None
+                if face_gray.size > 0:
+                    quality = float(cv2.Laplacian(face_gray, cv2.CV_64F).var())
+
+                now_add = time.time()
+                can_add = (
+                    quality is not None and quality >= QUALITY_MIN_VAR and
+                    (now_add - last_added_ts.get(recognized_id, 0.0)) >= ADD_COOLDOWN_SEC
+                )
+
+                if can_add:
+                    person_embs = embeddings_by_person.get(recognized_id, [])
+                    is_diverse = True
+                    if person_embs:
+                        dists = [np.linalg.norm(emb_live - e) for e in person_embs]
+                        min_person_dist = min(dists)
+                        is_diverse = min_person_dist >= DIVERSITY_MIN_DIST
+
+                    if is_diverse:
+                        try:
+                            cursor.execute(
+                                "INSERT INTO face_embeddings (face_id, embedding, created_at, quality) VALUES (?, ?, datetime('now'), ?)",
+                                (recognized_id, emb_live.astype(np.float64).tobytes(), quality),
+                            )
+                            conn.commit()
+                            last_added_ts[recognized_id] = now_add
+                            # Update in-memory collection so immediate next comparisons include it
+                            embeddings_by_person.setdefault(recognized_id, []).append(emb_live)
+                        except Exception:
+                            pass
+
+            # Draw rectangle and labels
             x, y, w, h = (face.left(), face.top(), face.width(), face.height())
             cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
             label = recognized_name
             if recognized_id is not None and recognized_seen_count is not None:
                 label = f"{recognized_name} (seen {recognized_seen_count})"
             cv2.putText(frame, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            # Draw last seen right below the name
             if recognized_id is not None:
                 last_label = f"Last: {recognized_last_seen_str if recognized_last_seen_str else '—'}"
                 cv2.putText(frame, last_label, (x, y+15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
