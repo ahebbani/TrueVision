@@ -20,6 +20,16 @@ predictor = dlib.shape_predictor(predictor_path)
 face_rec_model_path = os.path.join(MODELS_DIR, 'dlib_face_recognition_resnet_model_v1.dat')
 face_rec_model = dlib.face_recognition_model_v1(face_rec_model_path)
 
+# Optional CNN detector for better angle/occlusion robustness (uses GPU if dlib built with CUDA)
+DETECTOR_MODE = os.environ.get('FACE_DETECTOR', 'auto')  # 'auto' | 'hog' | 'cnn'
+cnn_model_path = os.path.join(MODELS_DIR, 'mmod_human_face_detector.dat')
+cnn_detector = None
+if DETECTOR_MODE in ('auto', 'cnn') and os.path.exists(cnn_model_path):
+    try:
+        cnn_detector = dlib.cnn_face_detection_model_v1(cnn_model_path)
+    except Exception:
+        cnn_detector = None
+
 # Connect to SQLite database (relative to this script)
 db_path = os.path.join(DB_DIR, 'faces.db')
 conn = sqlite3.connect(db_path)
@@ -79,6 +89,29 @@ def ensure_embeddings_schema(connection):
 
 ensure_embeddings_schema(conn)
 
+MAX_TEMPLATES_PER_PERSON = 30
+
+def prune_embeddings_if_needed(connection, face_id: int, max_count: int = MAX_TEMPLATES_PER_PERSON):
+    cur = connection.cursor()
+    cur.execute(
+        "SELECT id, quality, created_at FROM face_embeddings WHERE face_id = ?",
+        (face_id,),
+    )
+    rows = cur.fetchall()
+    if len(rows) <= max_count:
+        return
+    # Sort by quality asc (None first), then by created_at asc (oldest first)
+    def sort_key(r):
+        rid, q, ts = r
+        qv = -1.0 if q is None else float(q)
+        return (qv, ts or '')
+    rows_sorted = sorted(rows, key=sort_key)
+    to_remove = rows_sorted[: max(0, len(rows_sorted) - max_count)]
+    ids = [r[0] for r in to_remove]
+    if ids:
+        cur.executemany("DELETE FROM face_embeddings WHERE id = ?", [(i,) for i in ids])
+        connection.commit()
+
 def recognize_face():
     cap = cv2.VideoCapture(0)
     print("Press 'q' to quit.")
@@ -100,7 +133,12 @@ def recognize_face():
             break
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = detector(gray)
+        # Detect faces using selected detector
+        if cnn_detector is not None and DETECTOR_MODE in ('auto', 'cnn'):
+            dets = cnn_detector(gray, 1)
+            faces = [d.rect for d in dets]
+        else:
+            faces = detector(gray)
 
         recognized_ids_in_frame = set()
 
@@ -197,6 +235,8 @@ def recognize_face():
                             last_added_ts[recognized_id] = now_add
                             # Update in-memory collection so immediate next comparisons include it
                             embeddings_by_person.setdefault(recognized_id, []).append(emb_live)
+                            # Enforce cap per person to keep DB small and curated
+                            prune_embeddings_if_needed(conn, recognized_id, MAX_TEMPLATES_PER_PERSON)
                         except Exception:
                             pass
 
