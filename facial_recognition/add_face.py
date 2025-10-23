@@ -46,8 +46,89 @@ if "seen_count" not in cols:
     cursor.execute("ALTER TABLE faces ADD COLUMN seen_count INTEGER NOT NULL DEFAULT 0")
 conn.commit()
 
+def _try_open_opencv_device(index: int, w: int, h: int, fps: int):
+    cap = cv2.VideoCapture(index)
+    if not cap.isOpened():
+        return None
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+    cap.set(cv2.CAP_PROP_FPS, fps)
+    ok, _ = cap.read()
+    if ok:
+        print("Camera: Opened via OpenCV V4L2 (device index 0)")
+        return cap
+    cap.release()
+    return None
+
+
+def _try_open_gstreamer_libcamera(w: int, h: int, fps: int):
+    pipeline = (
+        f"libcamerasrc ! video/x-raw, width={w}, height={h}, framerate={fps}/1 "
+        f"! videoconvert ! video/x-raw, format=BGR ! appsink"
+    )
+    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+    if cap.isOpened():
+        ok, _ = cap.read()
+        if ok:
+            print("Camera: Opened via GStreamer libcamera pipeline")
+            return cap
+        cap.release()
+    return None
+
+
+def _try_open_picamera2(w: int, h: int):
+    try:
+        from picamera2 import Picamera2
+
+        class PiCam2Capture:
+            def __init__(self, width: int, height: int):
+                self._picam2 = Picamera2()
+                config = self._picam2.create_preview_configuration(
+                    main={"size": (width, height), "format": "RGB888"}
+                )
+                self._picam2.configure(config)
+                self._picam2.start()
+
+            def read(self):
+                arr = self._picam2.capture_array()  # RGB
+                frame = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+                return True, frame
+
+            def isOpened(self):
+                return True
+
+            def release(self):
+                self._picam2.stop()
+                try:
+                    self._picam2.close()
+                except Exception:
+                    pass
+
+        print("Camera: Using Picamera2 fallback")
+        return PiCam2Capture(w, h)
+    except Exception:
+        return None
+
+
+def open_camera(preferred_width: int = 640, preferred_height: int = 480, preferred_fps: int = 30):
+    cap = _try_open_opencv_device(0, preferred_width, preferred_height, preferred_fps)
+    if cap is not None:
+        return cap
+    cap = _try_open_gstreamer_libcamera(preferred_width, preferred_height, preferred_fps)
+    if cap is not None:
+        return cap
+    cap = _try_open_picamera2(preferred_width, preferred_height)
+    if cap is not None:
+        return cap
+    return None
+
+
 def add_face(name):
-    cap = cv2.VideoCapture(0)
+    cap = open_camera()
+    if cap is None:
+        print("ERROR: Could not open any camera. On Raspberry Pi, ensure libcamera works (try: libcamera-hello).\n"
+              "Install either python3-opencv with GStreamer support, or python3-picamera2.")
+        return
     print("Press 's' to capture the face and save it.")
 
     while True:
@@ -82,7 +163,10 @@ def add_face(name):
         elif key == ord('q'):
             break
 
-    cap.release()
+    try:
+        cap.release()
+    except Exception:
+        pass
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
