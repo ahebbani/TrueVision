@@ -30,6 +30,9 @@ if DETECTOR_MODE in ('auto', 'cnn') and os.path.exists(cnn_model_path):
     except Exception:
         cnn_detector = None
 
+# UI display mode: draw overlays on black background (for AR glasses)
+OVERLAY_ONLY = True  # If True, hide camera feed and draw bounding boxes/labels on black
+
 # Connect to SQLite database (relative to this script)
 db_path = os.path.join(DB_DIR, 'faces.db')
 conn = sqlite3.connect(db_path)
@@ -256,6 +259,9 @@ def recognize_face():
         if not ret:
             break
 
+        # Create the display frame depending on overlay mode
+        display_frame = np.zeros_like(frame) if OVERLAY_ONLY else frame.copy()
+
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         # Detect faces using selected detector
         if cnn_detector is not None and DETECTOR_MODE in ('auto', 'cnn'):
@@ -366,16 +372,16 @@ def recognize_face():
                         except Exception:
                             pass
 
-            # Draw rectangle and labels
+            # Draw rectangle and labels (on display_frame)
             x, y, w, h = (face.left(), face.top(), face.width(), face.height())
-            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+            cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
             label = recognized_name
             if recognized_id is not None and recognized_seen_count is not None:
                 label = f"{recognized_name} (seen {recognized_seen_count})"
-            cv2.putText(frame, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            cv2.putText(display_frame, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
             if recognized_id is not None:
                 last_label = f"Last: {recognized_last_seen_str if recognized_last_seen_str else '—'}"
-                cv2.putText(frame, last_label, (x, y+15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                cv2.putText(display_frame, last_label, (x, y+15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
         # Mark present -> absent when not seen for grace period
         now_ts = time.time()
@@ -385,7 +391,7 @@ def recognize_face():
                 if last_ts is not None and (now_ts - last_ts) > ABSENCE_GRACE_SEC:
                     presence_state[pid] = 'absent'
 
-        cv2.imshow("Face Recognition", frame)
+        cv2.imshow("Face Recognition", display_frame)
 
         key = cv2.waitKey(1)
         if key == ord('q'):
