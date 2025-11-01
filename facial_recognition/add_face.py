@@ -63,17 +63,39 @@ def _try_open_opencv_device(index: int, w: int, h: int, fps: int):
 
 def _try_open_gstreamer_libcamera(w: int, h: int, fps: int):
     pipeline = (
-        f"libcamerasrc ! video/x-raw, width={w}, height={h}, framerate={fps}/1 "
-        f"! videoconvert ! video/x-raw, format=BGR ! appsink"
+        f"libcamerasrc ! video/x-raw, width={w}, height={h}, framerate={fps}/1, format=RGB "
+        f"! videoconvert ! video/x-raw, format=RGB ! appsink"
     )
     cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
-    if cap.isOpened():
-        ok, _ = cap.read()
-        if ok:
-            print("Camera: Opened via GStreamer libcamera pipeline")
-            return cap
+    if not cap.isOpened():
+        return None
+
+    class GstCameraCapture:
+        def __init__(self, base_cap):
+            self._cap = base_cap
+
+        def isOpened(self):
+            return self._cap.isOpened()
+
+        def read(self):
+            ok, frame = self._cap.read()
+            if not ok:
+                return ok, frame
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            return True, frame
+
+        def release(self):
+            try:
+                self._cap.release()
+            except Exception:
+                pass
+
+    ok, _ = cap.read()
+    if not ok:
         cap.release()
-    return None
+        return None
+    print("Camera: Opened via GStreamer libcamera pipeline")
+    return GstCameraCapture(cap)
 
 
 def _try_open_picamera2(w: int, h: int):

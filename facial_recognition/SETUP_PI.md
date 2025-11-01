@@ -62,6 +62,10 @@ python -m pip install --upgrade pip
 # (No need to pip install opencv or dlib; they come from apt.)
 ```
 
+Note: `.venv` is a hidden directory (name starts with a dot). Use `ls -la` to see it, or just activate it with `source .venv/bin/activate`.
+
+Important: On the Pi, don’t run `pip install -r requirements.txt` as-is; it will try to install `opencv-python`/`dlib` wheels and may conflict with the apt versions. Use the apt packages above and only pip-install extra project-specific libs if you add any later.
+
 ## 3) Get the dlib model files
 
 Place the model files in `facial_recognition/models/`:
@@ -162,6 +166,82 @@ Press `q` to quit.
 - Import errors for `cv2`/`dlib`: ensure you’re using the system Python, or a venv created with `--system-site-packages` so it can see `python3-opencv` and `python3-dlib` from apt.
 - "No display" errors: you’re headless; see notes above.
 - Slow performance on CNN detector: use default HOG detector, reduce resolution, and avoid full-screen windows.
+
+### Fix: venv won’t create or activate
+
+Common causes and fixes:
+
+1) Missing venv module
+
+```bash
+sudo apt update
+sudo apt install -y python3-venv python3-pip
+```
+
+2) ensurepip error during venv creation
+
+If you see an error referencing `ensurepip`, install `python3-venv` (above) and retry. You can also try:
+
+```bash
+python3 -m ensurepip --upgrade || true
+python3 -m venv .venv --system-site-packages
+```
+
+3) Permission issues in the repo folder
+
+```bash
+pwd  # should be your TrueVision repo
+ls -ld .
+id
+# If needed (replace 'pi' with your username):
+sudo chown -R "$USER":"$USER" .
+rm -rf .venv  # if a partial venv exists
+python3 -m venv .venv --system-site-packages
+```
+
+4) Verify the venv and imports
+
+```bash
+source .venv/bin/activate
+python -c "import sys; print(sys.executable)"
+python -c "import cv2, dlib, numpy as np; print('cv2', cv2.__version__, 'numpy', np.__version__)"
+```
+
+5) Do not pip-install OpenCV/dlib in this venv on the Pi
+
+If you already installed them via pip, remove them so the apt versions are used:
+
+```bash
+pip uninstall -y opencv-python opencv-python-headless dlib numpy
+python -c "import cv2, dlib; print('cv2 ok')"
+```
+
+### Fix: `ModuleNotFoundError: No module named 'cv2'`
+
+This means the Python interpreter you’re using can’t see OpenCV.
+
+1) Install OpenCV from apt (recommended on Raspberry Pi):
+
+```bash
+sudo apt update
+sudo apt install -y python3-opencv
+```
+
+2) Make sure you’re running with the same Python that has OpenCV:
+
+```bash
+python3 -c "import sys, cv2; print(sys.executable); print(cv2.__version__)"
+```
+
+3) If you use a virtualenv, recreate it to include system packages:
+
+```bash
+python3 -m venv .venv --system-site-packages
+source .venv/bin/activate
+python -c "import cv2; print(cv2.__version__)"
+```
+
+4) Avoid `pip install opencv-python` on the Pi—it’s large and may miss GStreamer/GUI pieces. If you must use pip, try `opencv-python-headless`, but note that GUI functions like `cv2.imshow` won’t work without additional GUI libs. Prefer the apt package whenever possible.
 
 ---
 
