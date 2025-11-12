@@ -4,6 +4,8 @@ import numpy as np
 import sqlite3
 import time
 import os
+import platform
+from datetime import datetime
 
 # Initialize face detector and shape predictor
 detector = dlib.get_frontal_face_detector()
@@ -115,11 +117,49 @@ def prune_embeddings_if_needed(connection, face_id: int, max_count: int = MAX_TE
         cur.executemany("DELETE FROM face_embeddings WHERE id = ?", [(i,) for i in ids])
         connection.commit()
 
+# Meetings schema for transcription sessions
+def ensure_meetings_schema(connection):
+    cur = connection.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS meetings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            person_id INTEGER NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            audio_path TEXT,
+            transcript TEXT,
+            summary TEXT,
+            FOREIGN KEY(person_id) REFERENCES faces(id)
+        )
+        """
+    )
+    connection.commit()
+
+ensure_meetings_schema(conn)
+
+
+# Camera backend selection (hardcoded override or env variables for convenience)
+CAMERA_BACKEND = os.environ.get('CAMERA_BACKEND', 'auto')  # 'auto' | 'opencv' | 'gstreamer' | 'picamera2'
+CAMERA_INDEX = int(os.environ.get('CAMERA_INDEX', '0'))   # used when backend == 'opencv'
+
 
 def _try_open_opencv_device(index: int, w: int, h: int, fps: int):
     """Try to open a standard /dev/video* device with OpenCV."""
     cap = cv2.VideoCapture(index)
     if not cap.isOpened():
+        # On macOS, try AVFoundation explicitly
+        if platform.system() == 'Darwin':
+            cap2 = cv2.VideoCapture(index, cv2.CAP_AVFOUNDATION)
+            if cap2.isOpened():
+                cap2.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+                cap2.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+                cap2.set(cv2.CAP_PROP_FPS, fps)
+                ok, _ = cap2.read()
+                if ok:
+                    print(f"Camera: Opened via OpenCV AVFoundation (device index {index})")
+                    return cap2
+                cap2.release()
         return None
     # Attempt to set properties (best-effort; may be ignored by backend)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
@@ -127,7 +167,7 @@ def _try_open_opencv_device(index: int, w: int, h: int, fps: int):
     cap.set(cv2.CAP_PROP_FPS, fps)
     ok, _ = cap.read()
     if ok:
-        print("Camera: Opened via OpenCV V4L2 (device index 0)")
+        print(f"Camera: Opened via OpenCV (device index {index})")
         return cap
     cap.release()
     return None
@@ -218,22 +258,33 @@ def open_camera(preferred_width: int = 640, preferred_height: int = 480, preferr
     Order: OpenCV /dev/video0 -> GStreamer libcamera -> Picamera2.
     Returns an object implementing read()/release()/isOpened(), or None if all fail.
     """
-    # 1) Try the default OpenCV device
-    cap = _try_open_opencv_device(0, preferred_width, preferred_height, preferred_fps)
-    if cap is not None:
-        return cap
+    backend = CAMERA_BACKEND.lower().strip()
 
-    # 2) Try libcamera via GStreamer
-    cap = _try_open_gstreamer_libcamera(preferred_width, preferred_height, preferred_fps)
-    if cap is not None:
-        return cap
+    def try_sequence(seq):
+        for name in seq:
+            if name == 'opencv':
+                cap = _try_open_opencv_device(CAMERA_INDEX, preferred_width, preferred_height, preferred_fps)
+                if cap is not None:
+                    return cap
+            elif name == 'gstreamer':
+                cap = _try_open_gstreamer_libcamera(preferred_width, preferred_height, preferred_fps)
+                if cap is not None:
+                    return cap
+            elif name == 'picamera2':
+                cap = _try_open_picamera2(preferred_width, preferred_height)
+                if cap is not None:
+                    return cap
+        return None
 
-    # 3) Try Picamera2
-    cap = _try_open_picamera2(preferred_width, preferred_height)
-    if cap is not None:
-        return cap
-
-    return None
+    if backend == 'opencv':
+        return try_sequence(['opencv'])
+    elif backend == 'gstreamer':
+        return try_sequence(['gstreamer'])
+    elif backend == 'picamera2':
+        return try_sequence(['picamera2'])
+    else:
+        # auto: prefer OpenCV device (works on macOS/Windows/Linux), then GStreamer (Pi), then Picamera2
+        return try_sequence(['opencv', 'gstreamer', 'picamera2'])
 
 def recognize_face():
     cap = open_camera()
@@ -242,6 +293,7 @@ def recognize_face():
               "Install either python3-opencv with GStreamer support, or python3-picamera2.")
         return
     print("Press 'q' to quit.")
+    print("Press 't' to toggle transcription on/off (default: ON).")
 
     # Session-based presence tracking: update only on absent -> present transitions
     presence_state = {}  # person_id -> 'present' | 'absent'
@@ -253,6 +305,18 @@ def recognize_face():
     ADD_COOLDOWN_SEC = 5.0
     DIVERSITY_MIN_DIST = 0.20  # require new sample to differ from all existing by at least this
     QUALITY_MIN_VAR = 120.0    # blur threshold via variance of Laplacian
+
+    # Transcription integration
+    from transcription import Recorder, Transcriber, summarize_text  # local module
+    transcription_enabled = True
+    active_recorders = {}  # person_id -> Recorder
+    active_meetings = {}   # person_id -> meeting_id
+    transcriber: Transcriber | None = None
+    try:
+        transcriber = Transcriber(model_size=os.environ.get('WHISPER_MODEL', 'tiny'))
+    except Exception:
+        print("WARNING: Transcriber initialization failed. Transcription disabled.")
+        transcription_enabled = False
 
     while True:
         ret, frame = cap.read()
@@ -331,6 +395,19 @@ def recognize_face():
                     if recognized_seen_count is not None:
                         recognized_seen_count += 1
                     recognized_last_seen_str = "now"
+                    # Start meeting + recorder if transcription enabled
+                    if transcription_enabled and recognized_id not in active_recorders:
+                        rec = Recorder()
+                        recordings_dir = os.path.join(BASE_DIR, 'recordings')
+                        audio_path_pending = rec.start(recordings_dir, f"person{recognized_id}")
+                        cursor.execute(
+                            "INSERT INTO meetings (person_id, started_at, audio_path) VALUES (?, datetime('now'), ?)",
+                            (recognized_id, audio_path_pending),
+                        )
+                        meeting_id = cursor.lastrowid
+                        conn.commit()
+                        active_recorders[recognized_id] = rec
+                        active_meetings[recognized_id] = meeting_id
                 else:
                     presence_state[recognized_id] = 'present'
 
@@ -382,6 +459,8 @@ def recognize_face():
             if recognized_id is not None:
                 last_label = f"Last: {recognized_last_seen_str if recognized_last_seen_str else '—'}"
                 cv2.putText(display_frame, last_label, (x, y+15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                if transcription_enabled and recognized_id in active_recorders:
+                    cv2.putText(display_frame, "REC", (x, y+30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
         # Mark present -> absent when not seen for grace period
         now_ts = time.time()
@@ -390,12 +469,39 @@ def recognize_face():
                 last_ts = last_detected_ts.get(pid)
                 if last_ts is not None and (now_ts - last_ts) > ABSENCE_GRACE_SEC:
                     presence_state[pid] = 'absent'
+                    # Close meeting if recording
+                    if pid in active_recorders:
+                        rec = active_recorders.pop(pid)
+                        meeting_id = active_meetings.pop(pid, None)
+                        audio_path_final = rec.stop()
+                        if meeting_id is not None and audio_path_final and transcription_enabled and transcriber is not None:
+                            try:
+                                transcript_text = transcriber.transcribe(audio_path_final)
+                            except Exception as e:
+                                print(f"Transcription failed: {e}")
+                                transcript_text = ''
+                            summary_text = summarize_text(transcript_text)
+                            cursor.execute(
+                                "UPDATE meetings SET ended_at = datetime('now'), transcript = ?, summary = ? WHERE id = ?",
+                                (transcript_text, summary_text, meeting_id),
+                            )
+                            conn.commit()
 
         cv2.imshow("Face Recognition", display_frame)
 
         key = cv2.waitKey(1)
         if key == ord('q'):
             break
+        if key == ord('t'):
+            transcription_enabled = not transcription_enabled
+            state_txt = 'ENABLED' if transcription_enabled else 'DISABLED'
+            print(f"Transcription {state_txt}")
+            # If disabling, stop all active recorders gracefully (without transcription)
+            if not transcription_enabled:
+                for pid, rec in list(active_recorders.items()):
+                    rec.stop()
+                active_recorders.clear()
+                active_meetings.clear()
 
     try:
         cap.release()
