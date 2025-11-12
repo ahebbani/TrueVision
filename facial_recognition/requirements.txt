@@ -1,8 +1,9 @@
-opencv-python
-dlib
 numpy==2.3.3
-# Optional: if you want to download/use the CNN face detector model (mmod) from dlib,
-# place 'mmod_human_face_detector.dat' into facial_recognition/models and set FACE_DETECTOR=cnn
+# Core app-side packages. On Raspberry Pi, install OpenCV and dlib via apt per SETUP_PI.md.
+Pillow
+luma.oled
 sounddevice
 soundfile
-faster-whisper
+
+# Optional speech-to-text (large install on ARM):
+# faster-whisper  # install from requirements-faster-whisper.txt if desired
