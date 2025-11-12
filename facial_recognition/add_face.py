@@ -4,6 +4,7 @@ import numpy as np
 import sqlite3
 import os
 import time
+import platform
 
 # Initialize face detector and shape predictor
 detector = dlib.get_frontal_face_detector()
@@ -46,16 +47,30 @@ if "seen_count" not in cols:
     cursor.execute("ALTER TABLE faces ADD COLUMN seen_count INTEGER NOT NULL DEFAULT 0")
 conn.commit()
 
+CAMERA_BACKEND = os.environ.get('CAMERA_BACKEND', 'auto')  # 'auto' | 'opencv' | 'gstreamer' | 'picamera2'
+CAMERA_INDEX = int(os.environ.get('CAMERA_INDEX', '0'))   # used when backend == 'opencv'
+
 def _try_open_opencv_device(index: int, w: int, h: int, fps: int):
     cap = cv2.VideoCapture(index)
     if not cap.isOpened():
+        if platform.system() == 'Darwin':
+            cap2 = cv2.VideoCapture(index, cv2.CAP_AVFOUNDATION)
+            if cap2.isOpened():
+                cap2.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+                cap2.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+                cap2.set(cv2.CAP_PROP_FPS, fps)
+                ok, _ = cap2.read()
+                if ok:
+                    print(f"Camera: Opened via OpenCV AVFoundation (device index {index})")
+                    return cap2
+                cap2.release()
         return None
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
     cap.set(cv2.CAP_PROP_FPS, fps)
     ok, _ = cap.read()
     if ok:
-        print("Camera: Opened via OpenCV V4L2 (device index 0)")
+        print(f"Camera: Opened via OpenCV (device index {index})")
         return cap
     cap.release()
     return None
@@ -133,16 +148,31 @@ def _try_open_picamera2(w: int, h: int):
 
 
 def open_camera(preferred_width: int = 640, preferred_height: int = 480, preferred_fps: int = 30):
-    cap = _try_open_opencv_device(0, preferred_width, preferred_height, preferred_fps)
-    if cap is not None:
-        return cap
-    cap = _try_open_gstreamer_libcamera(preferred_width, preferred_height, preferred_fps)
-    if cap is not None:
-        return cap
-    cap = _try_open_picamera2(preferred_width, preferred_height)
-    if cap is not None:
-        return cap
-    return None
+    backend = CAMERA_BACKEND.lower().strip()
+    def try_sequence(seq):
+        for name in seq:
+            if name == 'opencv':
+                cap = _try_open_opencv_device(CAMERA_INDEX, preferred_width, preferred_height, preferred_fps)
+                if cap is not None:
+                    return cap
+            elif name == 'gstreamer':
+                cap = _try_open_gstreamer_libcamera(preferred_width, preferred_height, preferred_fps)
+                if cap is not None:
+                    return cap
+            elif name == 'picamera2':
+                cap = _try_open_picamera2(preferred_width, preferred_height)
+                if cap is not None:
+                    return cap
+        return None
+
+    if backend == 'opencv':
+        return try_sequence(['opencv'])
+    elif backend == 'gstreamer':
+        return try_sequence(['gstreamer'])
+    elif backend == 'picamera2':
+        return try_sequence(['picamera2'])
+    else:
+        return try_sequence(['opencv', 'gstreamer', 'picamera2'])
 
 
 def add_face(name):
@@ -163,7 +193,9 @@ def add_face(name):
 
         for face in faces:
             landmarks = predictor(gray, face)
-            embedding = np.array(face_rec_model.compute_face_descriptor(frame, landmarks))
+            # dlib face recognition expects RGB input
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            embedding = np.array(face_rec_model.compute_face_descriptor(frame_rgb, landmarks))
 
             # Draw rectangle around the face
             x, y, w, h = (face.left(), face.top(), face.width(), face.height())
