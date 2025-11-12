@@ -6,6 +6,7 @@ import time
 import os
 import platform
 from datetime import datetime
+from typing import Optional
 
 # Initialize face detector and shape predictor
 detector = dlib.get_frontal_face_detector()
@@ -137,6 +138,14 @@ def ensure_meetings_schema(connection):
     connection.commit()
 
 ensure_meetings_schema(conn)
+
+
+# Optional: OLED status display (e.g., SSD1306 128x64 over I2C)
+try:
+    from oled_display import get_display
+    _oled = get_display()
+except Exception:
+    _oled = None
 
 
 # Camera backend selection (hardcoded override or env variables for convenience)
@@ -306,17 +315,48 @@ def recognize_face():
     DIVERSITY_MIN_DIST = 0.20  # require new sample to differ from all existing by at least this
     QUALITY_MIN_VAR = 120.0    # blur threshold via variance of Laplacian
 
-    # Transcription integration
-    from transcription import Recorder, Transcriber, summarize_text  # local module
+    # Transcription integration (optional; gracefully disable if deps missing)
     transcription_enabled = True
     active_recorders = {}  # person_id -> Recorder
     active_meetings = {}   # person_id -> meeting_id
-    transcriber: Transcriber | None = None
+    Recorder = None
+    Transcriber = None
+    summarize_text = lambda txt: ''
     try:
-        transcriber = Transcriber(model_size=os.environ.get('WHISPER_MODEL', 'tiny'))
-    except Exception:
-        print("WARNING: Transcriber initialization failed. Transcription disabled.")
+        from transcription import Recorder as _Recorder, Transcriber as _Transcriber, summarize_text as _summarize_text  # local module
+        Recorder, Transcriber, summarize_text = _Recorder, _Transcriber, _summarize_text
+    except Exception as e:
+        print(f"WARNING: Transcription modules unavailable ({e}). Transcription disabled.")
         transcription_enabled = False
+
+    transcriber: Optional[object] = None
+    if transcription_enabled and Transcriber is not None:
+        try:
+            transcriber = Transcriber(model_size=os.environ.get('WHISPER_MODEL', 'tiny'))
+        except Exception as e:
+            print(f"WARNING: Transcriber initialization failed ({e}). Transcription disabled.")
+            transcription_enabled = False
+
+    # Helper: update OLED with a compact status line or two
+    def _oled_show_person(name: str, seen_count: Optional[int], last_seen: Optional[str], rec: bool):
+        if not _oled:
+            return
+        lines = [name or "Unknown"]
+        meta = []
+        if seen_count is not None:
+            meta.append(f"seen {seen_count}")
+        if last_seen:
+            meta.append(f"last {last_seen}")
+        if meta:
+            lines.append(" • ".join(meta))
+        if rec:
+            lines.append("REC")
+        _oled.update_text(lines)
+
+    def _oled_idle():
+        if not _oled:
+            return
+        _oled.update_text(["No one", datetime.now().strftime("%H:%M:%S")])
 
     while True:
         ret, frame = cap.read()
@@ -395,6 +435,8 @@ def recognize_face():
                     if recognized_seen_count is not None:
                         recognized_seen_count += 1
                     recognized_last_seen_str = "now"
+                    # OLED: announce arrival
+                    _oled_show_person(recognized_name, recognized_seen_count, recognized_last_seen_str, transcription_enabled)
                     # Start meeting + recorder if transcription enabled
                     if transcription_enabled and recognized_id not in active_recorders:
                         rec = Recorder()
@@ -486,6 +528,9 @@ def recognize_face():
                                 (transcript_text, summary_text, meeting_id),
                             )
                             conn.commit()
+                    # If no one else present, show idle on OLED
+                    if _oled and all(v == 'absent' for v in presence_state.values()):
+                        _oled_idle()
 
         cv2.imshow("Face Recognition", display_frame)
 
@@ -508,6 +553,12 @@ def recognize_face():
     except Exception:
         pass
     cv2.destroyAllWindows()
+    # Clear OLED on exit
+    try:
+        if _oled:
+            _oled.clear()
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     recognize_face()
