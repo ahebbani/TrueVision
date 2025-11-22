@@ -358,6 +358,13 @@ def recognize_face():
             return
         _oled.update_text(["No one", datetime.now().strftime("%H:%M:%S")])
 
+    # Show initial idle status so the OLED isn't blank before first recognition
+    try:
+        if _oled:
+            _oled.update_text(["Ready", datetime.now().strftime("%H:%M:%S")])
+    except Exception:
+        pass
+
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -503,6 +510,10 @@ def recognize_face():
                 cv2.putText(display_frame, last_label, (x, y+15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
                 if transcription_enabled and recognized_id in active_recorders:
                     cv2.putText(display_frame, "REC", (x, y+30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+
+        # If no faces currently detected and nobody marked present, keep OLED in idle state
+        if _oled and len(faces) == 0 and all(v != 'present' for v in presence_state.values()):
+            _oled_idle()
 
         # Mark present -> absent when not seen for grace period
         now_ts = time.time()
