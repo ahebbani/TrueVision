@@ -2,6 +2,7 @@ import cv2
 import dlib
 import numpy as np
 import os
+import sys
 import time
 import platform
 
@@ -18,6 +19,12 @@ predictor = dlib.shape_predictor(predictor_path)
 
 face_rec_model_path = os.path.join(MODELS_DIR, 'dlib_face_recognition_resnet_model_v1.dat')
 face_rec_model = dlib.face_recognition_model_v1(face_rec_model_path)
+
+# Ensure repository root on sys.path when running as a script
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(THIS_DIR)
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 from data_access import open_db
 

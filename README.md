@@ -96,6 +96,11 @@ Choose the path that matches your environment. Run commands from the repo root s
 		pip install -r requirements-faster-whisper.txt
 		```
 
+	- If you’re missing dlib model files (shape predictor / face recognition), fetch them:
+		```bash
+		python -m facial_recognition.models.fetch_models
+		```
+
 - Desktop (Linux/macOS/Windows):
 	- Install core deps:
 		```bash
@@ -110,6 +115,10 @@ Choose the path that matches your environment. Run commands from the repo root s
 		python main.py
 		```
 	- Notes: OLED and Pi-specific camera backends may be unavailable; the app falls back gracefully. If OpenCV build lacks GStreamer, set `CAMERA_BACKEND=opencv`.
+	- If models are missing, download them:
+		```bash
+		python -m facial_recognition.models.fetch_models
+		```
 
 ## Database & audio linkage
 
