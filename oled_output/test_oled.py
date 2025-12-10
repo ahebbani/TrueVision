@@ -3,13 +3,13 @@
 Quick test for the SSD1306 OLED integration.
 
 Usage:
-  OLED=1 python3 test_oled.py
+  OLED=1 python3 -m oled_output.test_oled
 
 Optional env vars: OLED_I2C_BUS, OLED_I2C_ADDR, OLED_FONT, OLED_FONT_SIZE
 """
 import os
 import time
-from oled_display import get_display
+from oled_output.oled_display import get_display
 
 
 def main():

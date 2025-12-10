@@ -1,9 +1,8 @@
-import sqlite3
 import argparse
 import os
 from datetime import datetime
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'database', 'faces.db')
+from data_access import open_db, DB_PATH
 
 
 def get_stats(conn):
@@ -61,21 +60,7 @@ def main():
         print(f"Database not found at {DB_PATH}")
         return
 
-    conn = sqlite3.connect(DB_PATH)
-
-    # Ensure the table exists (in case user runs this before main.py created it)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS face_embeddings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            face_id INTEGER NOT NULL,
-            embedding BLOB NOT NULL,
-            created_at TEXT NOT NULL,
-            quality REAL,
-            FOREIGN KEY(face_id) REFERENCES faces(id)
-        )
-    """)
-    conn.commit()
+    conn = open_db(DB_PATH)
 
     if args.stats:
         get_stats(conn)

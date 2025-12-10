@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 import argparse
 import os
-import sqlite3
 from datetime import datetime
 from typing import Any, List, Tuple, Optional
 
+import sqlite3
+from data_access import DB_PATH as DB_PATH_DEFAULT, open_db
+
+# Restore BASE_DIR (removed during refactor) and derived reports directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH_DEFAULT = os.path.join(BASE_DIR, 'database', 'faces.db')
 REPORTS_DIR = os.path.join(BASE_DIR, 'reports')
 
 
@@ -163,7 +165,7 @@ def main():
         print(f"Database not found: {args.db}")
         return
 
-    conn = sqlite3.connect(args.db)
+    conn = open_db(args.db)
 
     faces, emb_stats, meetings = summarize_db(conn, args.limit)
 

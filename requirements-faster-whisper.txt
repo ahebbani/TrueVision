@@ -1,0 +1,4 @@
+# Optional transcription dependency (Whisper via faster-whisper + CTranslate2)
+# On Raspberry Pi 4B 64-bit this is sizeable; ensure adequate storage and swap.
+
+faster-whisper

@@ -1,0 +1,11 @@
+# Extra dependencies for desktop development (x86_64/macOS/Windows)
+# Use ONLY if you are not on Raspberry Pi. On the Pi, prefer apt packages for OpenCV & dlib.
+
+opencv-python
+# If conflicts, try: opencv-python-headless
+
+dlib
+# If build fails, install dlib via OS package manager instead.
+
+# Optional speech-to-text (large install):
+faster-whisper

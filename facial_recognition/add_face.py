@@ -1,7 +1,6 @@
 import cv2
 import dlib
 import numpy as np
-import sqlite3
 import os
 import time
 import platform
@@ -12,8 +11,7 @@ detector = dlib.get_frontal_face_detector()
 # Resolve paths relative to this file so it works from any CWD
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.path.join(BASE_DIR, 'models')
-DB_DIR = os.path.join(BASE_DIR, 'database')
-os.makedirs(DB_DIR, exist_ok=True)
+# Legacy DB_DIR removed; database now centrally managed in data_access.
 
 predictor_path = os.path.join(MODELS_DIR, 'shape_predictor_68_face_landmarks.dat')
 predictor = dlib.shape_predictor(predictor_path)
@@ -21,31 +19,11 @@ predictor = dlib.shape_predictor(predictor_path)
 face_rec_model_path = os.path.join(MODELS_DIR, 'dlib_face_recognition_resnet_model_v1.dat')
 face_rec_model = dlib.face_recognition_model_v1(face_rec_model_path)
 
-# Connect to SQLite database
-db_path = os.path.join(DB_DIR, 'faces.db')
-conn = sqlite3.connect(db_path)
-cursor = conn.cursor()
+from data_access import open_db
 
-# Create table and ensure columns if they don't exist
-cursor.execute(
-    """
-    CREATE TABLE IF NOT EXISTS faces (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        embedding BLOB NOT NULL
-    )
-    """
-)
-cursor.execute("PRAGMA table_info(faces)")
-cols = {row[1] for row in cursor.fetchall()}
-if "created_at" not in cols:
-    cursor.execute("ALTER TABLE faces ADD COLUMN created_at TEXT")
-    cursor.execute("UPDATE faces SET created_at = datetime('now') WHERE created_at IS NULL")
-if "last_seen_at" not in cols:
-    cursor.execute("ALTER TABLE faces ADD COLUMN last_seen_at TEXT")
-if "seen_count" not in cols:
-    cursor.execute("ALTER TABLE faces ADD COLUMN seen_count INTEGER NOT NULL DEFAULT 0")
-conn.commit()
+# Reuse centralized DB (schema ensured automatically)
+conn = open_db()
+cursor = conn.cursor()
 
 CAMERA_BACKEND = os.environ.get('CAMERA_BACKEND', 'auto')  # 'auto' | 'opencv' | 'gstreamer' | 'picamera2'
 CAMERA_INDEX = int(os.environ.get('CAMERA_INDEX', '0'))   # used when backend == 'opencv'

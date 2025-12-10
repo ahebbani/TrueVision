@@ -1,5 +1,0 @@
-# Optional transcription dependency
-# Installs faster-whisper (and CTranslate2) for on-device speech-to-text.
-# On Raspberry Pi 4B (64-bit), wheels generally exist but the install is large.
-
-faster-whisper

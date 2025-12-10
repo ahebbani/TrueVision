@@ -1,29 +1,43 @@
-import cv2
-import dlib
-import numpy as np
-import sqlite3
-import time
+"""Top-level application entry point for TrueVision.
+
+This consolidates functionality from component packages:
+- facial_recognition: core face detection & recognition logic + models
+- audio_analysis: optional transcription & summarization
+- oled_output: optional SSD1306 OLED status display
+- data_access: centralized SQLite schema & pruning utilities
+
+Run:
+    python main.py
+
+or:
+    python -m main  (if treated as a module in some contexts)
+"""
+from __future__ import annotations
+
 import os
 import platform
+import time
 from datetime import datetime
 from typing import Optional
 
-# Initialize face detector and shape predictor
+import cv2
+import dlib
+import numpy as np
+
+from data_access import open_db, prune_embeddings_if_needed, MAX_TEMPLATES_PER_PERSON
+
+# Paths to facial recognition resources (models remain under subpackage directory)
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+FACE_MODULE_DIR = os.path.join(ROOT_DIR, 'facial_recognition')
+MODELS_DIR = os.path.join(FACE_MODULE_DIR, 'models')
+RECORDINGS_DIR = os.path.join(ROOT_DIR, 'data', 'recordings')
+os.makedirs(RECORDINGS_DIR, exist_ok=True)
+
+# Initialize dlib components
 detector = dlib.get_frontal_face_detector()
+predictor = dlib.shape_predictor(os.path.join(MODELS_DIR, 'shape_predictor_68_face_landmarks.dat'))
+face_rec_model = dlib.face_recognition_model_v1(os.path.join(MODELS_DIR, 'dlib_face_recognition_resnet_model_v1.dat'))
 
-# Dynamically construct the paths relative to this file
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODELS_DIR = os.path.join(BASE_DIR, 'models')
-DB_DIR = os.path.join(BASE_DIR, 'database')
-os.makedirs(DB_DIR, exist_ok=True)
-
-predictor_path = os.path.join(MODELS_DIR, 'shape_predictor_68_face_landmarks.dat')
-predictor = dlib.shape_predictor(predictor_path)
-
-face_rec_model_path = os.path.join(MODELS_DIR, 'dlib_face_recognition_resnet_model_v1.dat')
-face_rec_model = dlib.face_recognition_model_v1(face_rec_model_path)
-
-# Optional CNN detector for better angle/occlusion robustness (uses GPU if dlib built with CUDA)
 DETECTOR_MODE = os.environ.get('FACE_DETECTOR', 'auto')  # 'auto' | 'hog' | 'cnn'
 cnn_model_path = os.path.join(MODELS_DIR, 'mmod_human_face_detector.dat')
 cnn_detector = None
@@ -33,131 +47,26 @@ if DETECTOR_MODE in ('auto', 'cnn') and os.path.exists(cnn_model_path):
     except Exception:
         cnn_detector = None
 
-# UI display mode: draw overlays on black background (for AR glasses)
-OVERLAY_ONLY = True  # If True, hide camera feed and draw bounding boxes/labels on black
+OVERLAY_ONLY = False  # Draw overlays on black background
 
-# Connect to SQLite database (relative to this script)
-db_path = os.path.join(DB_DIR, 'faces.db')
-conn = sqlite3.connect(db_path)
+# Database connection
+conn = open_db()
 cursor = conn.cursor()
 
-# Ensure schema has last seen fields
-def ensure_schema(connection):
-    cur = connection.cursor()
-    # Table may already exist (created by add_face.py), but ensure columns too
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS faces (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            embedding BLOB NOT NULL
-        )
-        """
-    )
-    cur.execute("PRAGMA table_info(faces)")
-    cols = {row[1] for row in cur.fetchall()}
-    if "created_at" not in cols:
-        # SQLite doesn't allow function defaults in ALTER; add column then backfill
-        cur.execute("ALTER TABLE faces ADD COLUMN created_at TEXT")
-        cur.execute("UPDATE faces SET created_at = datetime('now') WHERE created_at IS NULL")
-    if "last_seen_at" not in cols:
-        cur.execute("ALTER TABLE faces ADD COLUMN last_seen_at TEXT")
-    if "seen_count" not in cols:
-        cur.execute("ALTER TABLE faces ADD COLUMN seen_count INTEGER NOT NULL DEFAULT 0")
-    connection.commit()
-
-ensure_schema(conn)
-
-# Ensure secondary table for multiple embeddings per person and seed from existing data
-def ensure_embeddings_schema(connection):
-    cur = connection.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS face_embeddings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            face_id INTEGER NOT NULL,
-            embedding BLOB NOT NULL,
-            created_at TEXT NOT NULL,
-            quality REAL,
-            FOREIGN KEY(face_id) REFERENCES faces(id)
-        )
-        """
-    )
-    # Seed from faces.embedding for any face that doesn't yet have entries
-    cur.execute(
-        """
-        INSERT INTO face_embeddings (face_id, embedding, created_at)
-        SELECT id, embedding, datetime('now') FROM faces
-        WHERE embedding IS NOT NULL AND id NOT IN (SELECT face_id FROM face_embeddings)
-        """
-    )
-    connection.commit()
-
-ensure_embeddings_schema(conn)
-
-MAX_TEMPLATES_PER_PERSON = 30
-
-def prune_embeddings_if_needed(connection, face_id: int, max_count: int = MAX_TEMPLATES_PER_PERSON):
-    cur = connection.cursor()
-    cur.execute(
-        "SELECT id, quality, created_at FROM face_embeddings WHERE face_id = ?",
-        (face_id,),
-    )
-    rows = cur.fetchall()
-    if len(rows) <= max_count:
-        return
-    # Sort by quality asc (None first), then by created_at asc (oldest first)
-    def sort_key(r):
-        rid, q, ts = r
-        qv = -1.0 if q is None else float(q)
-        return (qv, ts or '')
-    rows_sorted = sorted(rows, key=sort_key)
-    to_remove = rows_sorted[: max(0, len(rows_sorted) - max_count)]
-    ids = [r[0] for r in to_remove]
-    if ids:
-        cur.executemany("DELETE FROM face_embeddings WHERE id = ?", [(i,) for i in ids])
-        connection.commit()
-
-# Meetings schema for transcription sessions
-def ensure_meetings_schema(connection):
-    cur = connection.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS meetings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            person_id INTEGER NOT NULL,
-            started_at TEXT NOT NULL,
-            ended_at TEXT,
-            audio_path TEXT,
-            transcript TEXT,
-            summary TEXT,
-            FOREIGN KEY(person_id) REFERENCES faces(id)
-        )
-        """
-    )
-    connection.commit()
-
-ensure_meetings_schema(conn)
-
-
-# Optional: OLED status display (e.g., SSD1306 128x64 over I2C)
+# Optional OLED
 try:
-    from oled_display import get_display
+    from oled_output.oled_display import get_display
     _oled = get_display()
 except Exception:
     _oled = None
 
-
-# Camera backend selection (hardcoded override or env variables for convenience)
-CAMERA_BACKEND = os.environ.get('CAMERA_BACKEND', 'auto')  # 'auto' | 'opencv' | 'gstreamer' | 'picamera2'
-CAMERA_INDEX = int(os.environ.get('CAMERA_INDEX', '0'))   # used when backend == 'opencv'
+CAMERA_BACKEND = os.environ.get('CAMERA_BACKEND', 'auto')
+CAMERA_INDEX = int(os.environ.get('CAMERA_INDEX', '0'))
 
 
 def _try_open_opencv_device(index: int, w: int, h: int, fps: int):
-    """Try to open a standard /dev/video* device with OpenCV."""
     cap = cv2.VideoCapture(index)
     if not cap.isOpened():
-        # On macOS, try AVFoundation explicitly
         if platform.system() == 'Darwin':
             cap2 = cv2.VideoCapture(index, cv2.CAP_AVFOUNDATION)
             if cap2.isOpened():
@@ -170,7 +79,6 @@ def _try_open_opencv_device(index: int, w: int, h: int, fps: int):
                     return cap2
                 cap2.release()
         return None
-    # Attempt to set properties (best-effort; may be ignored by backend)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
     cap.set(cv2.CAP_PROP_FPS, fps)
@@ -183,11 +91,6 @@ def _try_open_opencv_device(index: int, w: int, h: int, fps: int):
 
 
 def _try_open_gstreamer_libcamera(w: int, h: int, fps: int):
-    """Try to open Raspberry Pi libcamera via GStreamer pipeline (requires OpenCV with GStreamer).
-
-    Force pipeline to output RGB and convert to BGR in a small wrapper so the rest of the code
-    consistently works in BGR (OpenCV default) and colors look correct.
-    """
     pipeline = (
         f"libcamerasrc ! video/x-raw, width={w}, height={h}, framerate={fps}/1, format=RGB "
         f"! videoconvert ! video/x-raw, format=RGB ! appsink"
@@ -207,7 +110,6 @@ def _try_open_gstreamer_libcamera(w: int, h: int, fps: int):
             ok, frame = self._cap.read()
             if not ok:
                 return ok, frame
-            # Frame is RGB; convert to BGR for OpenCV display/processing
             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
             return True, frame
 
@@ -217,7 +119,6 @@ def _try_open_gstreamer_libcamera(w: int, h: int, fps: int):
             except Exception:
                 pass
 
-    # Test read once to validate pipeline
     ok, _ = cap.read()
     if not ok:
         cap.release()
@@ -227,7 +128,6 @@ def _try_open_gstreamer_libcamera(w: int, h: int, fps: int):
 
 
 def _try_open_picamera2(w: int, h: int):
-    """Fallback to Picamera2 if available. Returns an object with read()/release()/isOpened()."""
     try:
         from picamera2 import Picamera2
 
@@ -262,11 +162,6 @@ def _try_open_picamera2(w: int, h: int):
 
 
 def open_camera(preferred_width: int = 640, preferred_height: int = 480, preferred_fps: int = 30):
-    """Open a camera in a Raspberry Pi-friendly way, trying multiple backends.
-
-    Order: OpenCV /dev/video0 -> GStreamer libcamera -> Picamera2.
-    Returns an object implementing read()/release()/isOpened(), or None if all fail.
-    """
     backend = CAMERA_BACKEND.lower().strip()
 
     def try_sequence(seq):
@@ -292,8 +187,8 @@ def open_camera(preferred_width: int = 640, preferred_height: int = 480, preferr
     elif backend == 'picamera2':
         return try_sequence(['picamera2'])
     else:
-        # auto: prefer OpenCV device (works on macOS/Windows/Linux), then GStreamer (Pi), then Picamera2
         return try_sequence(['opencv', 'gstreamer', 'picamera2'])
+
 
 def recognize_face():
     cap = open_camera()
@@ -304,26 +199,27 @@ def recognize_face():
     print("Press 'q' to quit.")
     print("Press 't' to toggle transcription on/off (default: ON).")
 
-    # Session-based presence tracking: update only on absent -> present transitions
-    presence_state = {}  # person_id -> 'present' | 'absent'
-    last_detected_ts = {}  # person_id -> last timestamp this frame saw the person
-    ABSENCE_GRACE_SEC = 2.0  # require person to be missing for this long before marking absent
+    presence_state = {}
+    last_detected_ts = {}
+    ABSENCE_GRACE_SEC = 2.0
 
-    # Incremental sampling controls
-    last_added_ts = {}  # person_id -> last time we added a template
+    last_added_ts = {}
     ADD_COOLDOWN_SEC = 5.0
-    DIVERSITY_MIN_DIST = 0.20  # require new sample to differ from all existing by at least this
-    QUALITY_MIN_VAR = 120.0    # blur threshold via variance of Laplacian
+    DIVERSITY_MIN_DIST = 0.20
+    QUALITY_MIN_VAR = 120.0
 
-    # Transcription integration (optional; gracefully disable if deps missing)
     transcription_enabled = True
-    active_recorders = {}  # person_id -> Recorder
-    active_meetings = {}   # person_id -> meeting_id
+    active_recorders = {}
+    active_meetings = {}
     Recorder = None
     Transcriber = None
     summarize_text = lambda txt: ''
     try:
-        from transcription import Recorder as _Recorder, Transcriber as _Transcriber, summarize_text as _summarize_text  # local module
+        from audio_analysis.transcription import (
+            Recorder as _Recorder,
+            Transcriber as _Transcriber,
+            summarize_text as _summarize_text,
+        )
         Recorder, Transcriber, summarize_text = _Recorder, _Transcriber, _summarize_text
     except Exception as e:
         print(f"WARNING: Transcription modules unavailable ({e}). Transcription disabled.")
@@ -337,7 +233,6 @@ def recognize_face():
             print(f"WARNING: Transcriber initialization failed ({e}). Transcription disabled.")
             transcription_enabled = False
 
-    # Helper: update OLED with a compact status line or two
     def _oled_show_person(name: str, seen_count: Optional[int], last_seen: Optional[str], rec: bool):
         if not _oled:
             return
@@ -358,7 +253,6 @@ def recognize_face():
             return
         _oled.update_text(["No one", datetime.now().strftime("%H:%M:%S")])
 
-    # Show initial idle status so the OLED isn't blank before first recognition
     try:
         if _oled:
             _oled.update_text(["Ready", datetime.now().strftime("%H:%M:%S")])
@@ -370,11 +264,8 @@ def recognize_face():
         if not ret:
             break
 
-        # Create the display frame depending on overlay mode
         display_frame = np.zeros_like(frame) if OVERLAY_ONLY else frame.copy()
-
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        # Detect faces using selected detector
         if cnn_detector is not None and DETECTOR_MODE in ('auto', 'cnn'):
             dets = cnn_detector(gray, 1)
             faces = [d.rect for d in dets]
@@ -383,7 +274,6 @@ def recognize_face():
 
         recognized_ids_in_frame = set()
 
-        # Load all embeddings once per frame and prepare per-person collections
         cursor.execute(
             """
             SELECT fe.face_id, f.name, fe.embedding, f.seen_count, f.last_seen_at
@@ -397,16 +287,13 @@ def recognize_face():
         for person_id, name, db_embedding, db_seen_count, db_last_seen_at in rows:
             emb = np.frombuffer(db_embedding, dtype=np.float64)
             embeddings_by_person.setdefault(person_id, []).append(emb)
-            # store last seen/meta: last one wins but values are same for a person in join
             meta_by_person[person_id] = (name, db_seen_count, db_last_seen_at)
 
         for face in faces:
             landmarks = predictor(gray, face)
-            # dlib face recognition expects RGB input
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             emb_live = np.array(face_rec_model.compute_face_descriptor(frame_rgb, landmarks))
 
-            # Match to nearest template across all persons
             recognized_name = "Unknown"
             recognized_id = None
             recognized_seen_count = None
@@ -424,7 +311,6 @@ def recognize_face():
                         recognized_last_seen_str = db_last_seen_at
                         min_distance = distance
 
-            # Presence tracking and DB updates only on absent -> present transition
             if recognized_id is not None:
                 now_ts = time.time()
                 prev_state = presence_state.get(recognized_id, 'absent')
@@ -432,7 +318,6 @@ def recognize_face():
                 last_detected_ts[recognized_id] = now_ts
 
                 if prev_state != 'present':
-                    # Transition: absent -> present (new entry)
                     cursor.execute(
                         "UPDATE faces SET last_seen_at = datetime('now'), seen_count = seen_count + 1 WHERE id = ?",
                         (recognized_id,),
@@ -442,13 +327,10 @@ def recognize_face():
                     if recognized_seen_count is not None:
                         recognized_seen_count += 1
                     recognized_last_seen_str = "now"
-                    # OLED: announce arrival
                     _oled_show_person(recognized_name, recognized_seen_count, recognized_last_seen_str, transcription_enabled)
-                    # Start meeting + recorder if transcription enabled
                     if transcription_enabled and recognized_id not in active_recorders:
                         rec = Recorder()
-                        recordings_dir = os.path.join(BASE_DIR, 'recordings')
-                        audio_path_pending = rec.start(recordings_dir, f"person{recognized_id}")
+                        audio_path_pending = rec.start(RECORDINGS_DIR, f"person{recognized_id}")
                         cursor.execute(
                             "INSERT INTO meetings (person_id, started_at, audio_path) VALUES (?, datetime('now'), ?)",
                             (recognized_id, audio_path_pending),
@@ -460,7 +342,6 @@ def recognize_face():
                 else:
                     presence_state[recognized_id] = 'present'
 
-                # Consider adding this as a new template for diversity and quality
                 x, y, w, h = (face.left(), face.top(), face.width(), face.height())
                 x0, y0 = max(0, x), max(0, y)
                 x1, y1 = min(frame.shape[1], x + w), min(frame.shape[0], y + h)
@@ -491,14 +372,11 @@ def recognize_face():
                             )
                             conn.commit()
                             last_added_ts[recognized_id] = now_add
-                            # Update in-memory collection so immediate next comparisons include it
                             embeddings_by_person.setdefault(recognized_id, []).append(emb_live)
-                            # Enforce cap per person to keep DB small and curated
                             prune_embeddings_if_needed(conn, recognized_id, MAX_TEMPLATES_PER_PERSON)
                         except Exception:
                             pass
 
-            # Draw rectangle and labels (on display_frame)
             x, y, w, h = (face.left(), face.top(), face.width(), face.height())
             cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
             label = recognized_name
@@ -511,18 +389,15 @@ def recognize_face():
                 if transcription_enabled and recognized_id in active_recorders:
                     cv2.putText(display_frame, "REC", (x, y+30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
-        # If no faces currently detected and nobody marked present, keep OLED in idle state
         if _oled and len(faces) == 0 and all(v != 'present' for v in presence_state.values()):
             _oled_idle()
 
-        # Mark present -> absent when not seen for grace period
         now_ts = time.time()
         for pid, state in list(presence_state.items()):
             if state == 'present' and pid not in recognized_ids_in_frame:
                 last_ts = last_detected_ts.get(pid)
                 if last_ts is not None and (now_ts - last_ts) > ABSENCE_GRACE_SEC:
                     presence_state[pid] = 'absent'
-                    # Close meeting if recording
                     if pid in active_recorders:
                         rec = active_recorders.pop(pid)
                         meeting_id = active_meetings.pop(pid, None)
@@ -539,12 +414,10 @@ def recognize_face():
                                 (transcript_text, summary_text, meeting_id),
                             )
                             conn.commit()
-                    # If no one else present, show idle on OLED
                     if _oled and all(v == 'absent' for v in presence_state.values()):
                         _oled_idle()
 
         cv2.imshow("Face Recognition", display_frame)
-
         key = cv2.waitKey(1)
         if key == ord('q'):
             break
@@ -552,7 +425,6 @@ def recognize_face():
             transcription_enabled = not transcription_enabled
             state_txt = 'ENABLED' if transcription_enabled else 'DISABLED'
             print(f"Transcription {state_txt}")
-            # If disabling, stop all active recorders gracefully (without transcription)
             if not transcription_enabled:
                 for pid, rec in list(active_recorders.items()):
                     rec.stop()
@@ -564,12 +436,12 @@ def recognize_face():
     except Exception:
         pass
     cv2.destroyAllWindows()
-    # Clear OLED on exit
     try:
         if _oled:
             _oled.clear()
     except Exception:
         pass
+
 
 if __name__ == "__main__":
     recognize_face()

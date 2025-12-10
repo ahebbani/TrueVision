@@ -1,0 +1,11 @@
+# Top-level core dependencies for TrueVision
+# NOTE: On Raspberry Pi, install OpenCV and dlib via apt per facial_recognition/SETUP_PI.md.
+
+numpy==2.3.3
+Pillow
+luma.oled
+sounddevice
+soundfile
+
+# Camera modules may require system packages (libcamera, etc.)
+# Optional: transcription (install faster-whisper separately or use requirements-faster-whisper.txt)
