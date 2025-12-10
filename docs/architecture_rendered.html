@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>TrueVision Architecture (Rendered)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif; margin: 24px; }
+    h1, h2 { margin: 0 0 12px; }
+    section { margin-bottom: 32px; }
+    .note { color: #666; font-size: 14px; }
+    .mermaid { background: #fafafa; padding: 12px; border: 1px solid #eee; border-radius: 6px; }
+  </style>
+  <!-- Load Mermaid from CDN; renders diagrams client-side -->
+  <script src="https://unpkg.com/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({ startOnLoad: true, theme: 'default' });
+  </script>
+</head>
+<body>
+  <h1>TrueVision Architecture (Rendered)</h1>
+  <p class="note">Diagrams render client-side via Mermaid. Open this file in a browser or VS Code preview to view. Source mirrors <code>docs/architecture.md</code>.</p>
+
+  <section>
+    <h2>System Overview</h2>
+    <div class="mermaid">
+flowchart TB
+  subgraph Hardware
+    Camera["Camera\n(OpenCV / Picamera2)"]
+    Mic["Microphone\n(PortAudio)"]
+    OLED["OLED\n(luma.oled)"]
+  end
+
+  subgraph Application
+    Main["Main runtime\n(main.py)"]
+    Capture["Camera Capture"]
+    FR["FaceRecognition\n(dlib models)"]
+    Recorder["Recorder\n(sounddevice + soundfile)"]
+    Transcriber["Transcriber\n(faster-whisper)"]
+    Summarizer["Summarizer"]
+    OLEDSrv["OLED Service"]
+    DB["SQLite DB\n(data_access/faces.db)"]
+  end
+
+  Camera -->|frames| Capture --> Main
+  Main --> FR
+  FR -->|embedding| DB
+  Main -->|start/stop| Recorder
+  Recorder -->|wav file| Transcriber
+  Transcriber -->|text| Summarizer
+  Summarizer --> DB
+  Main --> OLEDSrv
+  OLED --> OLEDSrv
+  DB --> Main
+    </div>
+  </section>
+
+  <section>
+    <h2>Main Runtime (Sequence)</h2>
+    <div class="mermaid">
+sequenceDiagram
+  participant UI as User/Console
+  participant Main as main.run()
+  participant Camera as Camera.capture()
+  participant FR as FaceRecognition
+  participant DB as DataAccess
+  participant Recorder as Recorder
+  participant Trans as Transcriber
+  participant OLED as OLED Service
+
+  UI->>Main: start()
+  Main->>Camera: open()
+  loop every frame
+    Camera->>Main: frame
+    Main->>FR: detect_and_embed(frame)
+    FR->>DB: find_best_match(embedding)
+    DB-->>Main: match/result
+    Main->>OLED: show_face(match)
+  end
+  Main->>Recorder: start_recording() (on meeting start)
+  Recorder-->>Main: audio_path (when stopped)
+  Main->>Trans: transcribe(audio_path)
+  Trans-->>Main: transcript
+  Main->>DB: update_meeting(transcript, summary)
+  Main->>OLED: show_summary(summary)
+  Main->>Camera: close()
+  UI->>Main: stop()
+    </div>
+  </section>
+
+  <section>
+    <h2>Camera Capture</h2>
+    <div class="mermaid">
+flowchart TB
+  subgraph Capture[Camera Capture]
+    OC["OpenCV VideoCapture"]
+    PC["Picamera2 wrapper (optional)"]
+  end
+  OC -->|frames| Main["Main runtime"]
+  PC -->|frames| Main
+    </div>
+  </section>
+
+  <section>
+    <h2>FaceRecognition</h2>
+    <div class="mermaid">
+flowchart LR
+  Frame["frame image"] --> Detector["detect_faces(frame)"]
+  Detector --> Cropper["crop_face_images"]
+  Cropper --> Embedder["compute_embedding(face_img)"]
+  Embedder --> Matcher["match_embedding(embedding)"]
+  Matcher --> DB["SQLite DB"]
+    </div>
+  </section>
+
+  <section>
+    <h2>Data Access</h2>
+    <div class="mermaid">
+flowchart LR
+  App["App modules"] -->|open_db()| DB["SQLite DB"]
+  DB --> Faces["faces table"]
+  DB --> Emb["face_embeddings table"]
+  DB --> Meet["meetings table"]
+    </div>
+  </section>
+
+  <section>
+    <h2>Audio Analysis</h2>
+    <div class="mermaid">
+flowchart LR
+  Main["Main runtime"] -->|start/stop| Recorder["Recorder"]
+  Recorder -->|wav file| Storage["recordings/"]
+  Storage --> Transcriber["Transcriber"]
+  Transcriber --> Transcript["transcript text"]
+  Transcript --> Summarizer["Summarizer"]
+  Summarizer --> DB["SQLite DB"]
+    </div>
+  </section>
+
+  <section>
+    <h2>OLED Output</h2>
+    <div class="mermaid">
+flowchart TB
+  Main["Main runtime"] --> OLEDSvc["OLED service wrapper"]
+  OLEDSvc --> Luma["luma.oled device"]
+  Luma --> OLED["hardware OLED"]
+    </div>
+  </section>
+
+  <section>
+    <h2>CLI Tooling</h2>
+    <div class="mermaid">
+flowchart LR
+  CLI["add_face/manage_embeddings/visualize_db"] --> data_access.open_db()
+  CLI --> FaceRecognition["embedding creation helpers"]
+  CLI --> DB["SQLite DB"]
+    </div>
+  </section>
+</body>
+</html>

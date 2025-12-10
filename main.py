@@ -211,6 +211,8 @@ def recognize_face():
     transcription_enabled = True
     active_recorders = {}
     active_meetings = {}
+    live_captions = {}
+    last_live_update = {}
     Recorder = None
     Transcriber = None
     summarize_text = lambda txt: ''
@@ -389,6 +391,77 @@ def recognize_face():
                 if transcription_enabled and recognized_id in active_recorders:
                     cv2.putText(display_frame, "REC", (x, y+30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
+        # Live transcription overlay (closed captioning)
+        if transcription_enabled and transcriber is not None and active_recorders:
+            now = time.time()
+            for pid, rec in list(active_recorders.items()):
+                audio_path = rec.audio_path
+                if not audio_path:
+                    continue
+                last_ts = last_live_update.get(pid, 0.0)
+                if (now - last_ts) >= 0.7:  # throttle updates (more frequent)
+                    try:
+                        text_live = transcriber.transcribe(audio_path)
+                        last_live_update[pid] = now
+                        # Keep only a short tail for overlay
+                        tail = text_live.strip().split()
+                        tail_txt = " ".join(tail[-30:])  # ~ last few words
+                        live_captions[pid] = tail_txt
+                        # Optionally persist incremental transcript to DB
+                        mid = active_meetings.get(pid)
+                        if mid is not None and text_live:
+                            cursor.execute(
+                                "UPDATE meetings SET transcript = ? WHERE id = ?",
+                                (text_live, mid),
+                            )
+                            conn.commit()
+                    except Exception:
+                        pass
+            # Draw the most recent caption for any present person at bottom
+            if live_captions:
+                caption = None
+                # Prefer caption of someone currently present
+                for pid, state in presence_state.items():
+                    if state == 'present' and pid in live_captions:
+                        caption = live_captions.get(pid)
+                        break
+                if caption is None:
+                    # fallback to any caption
+                    caption = next(iter(live_captions.values()))
+                if caption:
+                    # Wrap caption text to fit window width
+                    img_h, img_w = display_frame.shape[0], display_frame.shape[1]
+                    margin = 10
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = 0.6
+                    thickness = 2
+
+                    words = caption.split()
+                    lines = []
+                    current = ""
+                    for w in words:
+                        test = (current + (" " if current else "") + w)
+                        ((tw, th), _) = cv2.getTextSize(test, font, font_scale, thickness)
+                        if tw + margin*2 <= img_w:
+                            current = test
+                        else:
+                            if current:
+                                lines.append(current)
+                            current = w
+                    if current:
+                        lines.append(current)
+
+                    # Limit lines to 2 for compactness
+                    lines = lines[-2:]
+                    line_height = int(cv2.getTextSize("Ag", font, font_scale, thickness)[0][1] * 1.6)
+                    box_height = line_height * len(lines) + margin*2
+                    y0 = max(0, img_h - box_height)
+                    cv2.rectangle(display_frame, (0, y0), (img_w, img_h), (0, 0, 0), -1)
+                    y = y0 + margin + int(line_height * 0.8)
+                    for ln in lines:
+                        cv2.putText(display_frame, ln, (margin, y), font, font_scale, (255, 255, 255), thickness)
+                        y += line_height
+
         if _oled and len(faces) == 0 and all(v != 'present' for v in presence_state.values()):
             _oled_idle()
 
@@ -408,6 +481,7 @@ def recognize_face():
                             except Exception as e:
                                 print(f"Transcription failed: {e}")
                                 transcript_text = ''
+                            # Summary can be backfilled later; compute now if lightweight
                             summary_text = summarize_text(transcript_text)
                             cursor.execute(
                                 "UPDATE meetings SET ended_at = datetime('now'), transcript = ?, summary = ? WHERE id = ?",

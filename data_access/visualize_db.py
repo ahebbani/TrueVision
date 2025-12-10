@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 import argparse
 import os
+import sys
 from datetime import datetime
-from typing import Any, List, Tuple, Optional
+from typing import Any, Tuple
 
 import sqlite3
-from data_access import DB_PATH as DB_PATH_DEFAULT, open_db
 
-# Restore BASE_DIR (removed during refactor) and derived reports directory
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-REPORTS_DIR = os.path.join(BASE_DIR, 'reports')
+# Allow running this file directly (python data_access/visualize_db.py)
+# by ensuring the repository root is on sys.path, then import data_access.db
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+from data_access.db import DB_PATH as DB_PATH_DEFAULT, open_db
+
+DOCS_REPORT_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'docs', 'db_report.html')
 
 
 def _fetchall(conn: sqlite3.Connection, query: str, params: Tuple[Any, ...] = ()) -> list:
@@ -34,21 +39,23 @@ def summarize_db(conn: sqlite3.Connection, limit_meetings: int = 10):
 
     if table_exists(conn, 'face_embeddings'):
         emb_counts = _fetchall(conn, "SELECT face_id, COUNT(*), ROUND(AVG(COALESCE(quality, 0)), 2) FROM face_embeddings GROUP BY face_id")
-        emb_stats = {row[0]: (row[1], row[2]) for row in emb_counts}  # face_id -> (count, avgq)
+        emb_stats = {row[0]: (row[1], row[2]) for row in emb_counts}
 
     if table_exists(conn, 'meetings'):
         meetings = _fetchall(
             conn,
-            """
-            SELECT m.id, m.person_id, f.name, m.started_at, m.ended_at,
-                   COALESCE(LENGTH(m.transcript), 0) as tlen,
-                   COALESCE(m.summary, '') as summary,
-                   m.audio_path
-            FROM meetings m
-            LEFT JOIN faces f ON f.id = m.person_id
-            ORDER BY COALESCE(m.started_at, m.id) DESC
-            LIMIT ?
-            """,
+            (
+                """
+                SELECT m.id, m.person_id, f.name, m.started_at, m.ended_at,
+                       COALESCE(LENGTH(m.transcript), 0) as tlen,
+                       COALESCE(m.summary, '') as summary,
+                       m.audio_path
+                FROM meetings m
+                LEFT JOIN faces f ON f.id = m.person_id
+                ORDER BY COALESCE(m.started_at, m.id) DESC
+                LIMIT ?
+                """
+            ),
             (limit_meetings,),
         )
 
@@ -81,7 +88,7 @@ def print_console(faces, emb_stats, meetings):
                 audio = '…' + audio[-27:]
             print(f"{mid:>3}  {name:<20}  {start:<19}  {end:<19}  {tlen:>16}  {audio:<30}")
 
-    print("\nTip: run with --html to generate an HTML report under facial_recognition/reports/\n")
+    print("\nTip: run with --html to generate an HTML report under docs/\n")
 
 
 def write_html(faces, emb_stats, meetings, out_path: str):
@@ -106,9 +113,9 @@ def write_html(faces, emb_stats, meetings, out_path: str):
 
     html = f"""
 <!DOCTYPE html>
-<html lang="en">
+<html lang=\"en\">
 <head>
-<meta charset="utf-8" />
+<meta charset=\"utf-8\" />
 <title>TrueVision Database Report</title>
 <style>
  body {{ font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif; margin: 24px; }}
@@ -123,7 +130,7 @@ def write_html(faces, emb_stats, meetings, out_path: str):
 </head>
 <body>
 <h1>TrueVision Database Report</h1>
-<p class="muted">Generated: {datetime.utcnow().isoformat(timespec='seconds')}Z</p>
+<p class=\"muted\">Generated: {datetime.utcnow().isoformat(timespec='seconds')}Z</p>
 
 <h2>Faces</h2>
 <table>
@@ -142,7 +149,7 @@ def write_html(faces, emb_stats, meetings, out_path: str):
 </thead>
 <tbody>
 {''.join(rows_meet)}
-</tbody>
+<\tbody>
 </table>
 
 <p><small>Report path: {esc(out_path)}</small></p>
@@ -158,7 +165,7 @@ def main():
     parser = argparse.ArgumentParser(description="Visualize TrueVision SQLite database")
     parser.add_argument('--db', default=DB_PATH_DEFAULT, help='Path to faces.db (default: %(default)s)')
     parser.add_argument('--limit', type=int, default=10, help='Number of recent meetings to show (default: %(default)s)')
-    parser.add_argument('--html', action='store_true', help='Generate HTML report in facial_recognition/reports')
+    parser.add_argument('--html', action='store_true', help='Generate HTML report in docs/')
     args = parser.parse_args()
 
     if not os.path.exists(args.db):
@@ -170,8 +177,7 @@ def main():
     faces, emb_stats, meetings = summarize_db(conn, args.limit)
 
     if args.html:
-        os.makedirs(REPORTS_DIR, exist_ok=True)
-        out_path = os.path.join(REPORTS_DIR, 'db_report.html')
+        out_path = DOCS_REPORT_PATH
         write_html(faces, emb_stats, meetings, out_path)
         print(f"HTML report written to: {out_path}")
     else:
