@@ -38,18 +38,12 @@ Run commands from the repository root so Python can discover sibling packages.
 
 ## OLED display
 
-An SSD1306 128x64 OLED (like Adafruit’s 0.96" STEMMA QT) can mirror on-screen labels (name, seen count, last seen, REC). Enable with:
+An SSD1306 128x64 OLED (like Adafruit’s 0.96" STEMMA QT) can mirror on-screen labels (name, seen count, last seen, REC). If the OLED libraries and hardware are available, the app will use it automatically; otherwise it will continue without OLED output.
+
+See `facial_recognition/SETUP_PI.md` section "Optional: SSD1306 OLED" for wiring details. You can test the OLED module independently with:
 
 ```bash
-OLED=1 python3 main.py
-```
-
-See `facial_recognition/SETUP_PI.md` section "Optional: SSD1306 OLED" for wiring and environment variables.
-
-Test the OLED module independently (after setting env vars) with:
-
-```bash
-OLED=1 python -m oled_output.test_oled
+python -m oled_output.test_oled
 ```
 
 ## Transcription (audio analysis)

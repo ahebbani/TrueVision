@@ -1,0 +1,52 @@
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from typing import Dict, Optional, Tuple
+
+
+@dataclass
+class CaptionConfig:
+    interval_sec: float = 0.7
+    max_words: int = 30
+
+
+class LiveCaptioner:
+    def __init__(self, transcriber, cfg: CaptionConfig):
+        self.transcriber = transcriber
+        self.cfg = cfg
+        self._last_update: Dict[int, float] = {}
+        self._captions: Dict[int, str] = {}
+
+    def update(self, active_recorders: Dict[int, object], active_meetings: Dict[int, int], cursor) -> None:
+        now = time.time()
+        for pid, rec in list(active_recorders.items()):
+            audio_path = getattr(rec, 'audio_path', None)
+            if not audio_path:
+                continue
+            last_ts = self._last_update.get(pid, 0.0)
+            if (now - last_ts) < self.cfg.interval_sec:
+                continue
+            try:
+                text_live = self.transcriber.transcribe(audio_path)
+                self._last_update[pid] = now
+                words = (text_live or '').strip().split()
+                tail_txt = ' '.join(words[-self.cfg.max_words:])
+                self._captions[pid] = tail_txt
+                mid = active_meetings.get(pid)
+                if mid is not None and text_live:
+                    cursor.execute(
+                        "UPDATE meetings SET transcript = ? WHERE id = ?",
+                        (text_live, mid),
+                    )
+            except Exception:
+                pass
+
+    def get_caption_for_present(self, presence_state: Dict[int, str]) -> Optional[str]:
+        for pid, state in presence_state.items():
+            if state == 'present' and pid in self._captions:
+                return self._captions.get(pid)
+        # fallback to any caption
+        if self._captions:
+            return next(iter(self._captions.values()))
+        return None

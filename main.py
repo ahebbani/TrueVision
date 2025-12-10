@@ -1,30 +1,29 @@
-"""Top-level application entry point for TrueVision.
+"""Top-level orchestrator for TrueVision.
 
-This consolidates functionality from component packages:
-- facial_recognition: core face detection & recognition logic + models
-- audio_analysis: optional transcription & summarization
-- oled_output: optional SSD1306 OLED status display
-- data_access: centralized SQLite schema & pruning utilities
+Responsibilities:
+- Parse flags/environment, configure subsystems
+- Wire camera, recognizer, audio transcription, OLED, and DB
+- Drive the main loop; subsystems encapsulate specific logic
 
 Run:
-    python main.py
-
-or:
-    python -m main  (if treated as a module in some contexts)
+    python main.py [--flags]
 """
 from __future__ import annotations
 
 import os
+import argparse
 import platform
 import time
 from datetime import datetime
 from typing import Optional
 
 import cv2
-import dlib
 import numpy as np
 
 from data_access import open_db, prune_embeddings_if_needed, MAX_TEMPLATES_PER_PERSON
+from data_access.db import DB_PATH as DB_PATH_DEFAULT
+from facial_recognition.camera import open_camera
+from facial_recognition.recognizer import Recognizer, RecognizerConfig
 
 # Paths to facial recognition resources (models remain under subpackage directory)
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -33,21 +32,7 @@ MODELS_DIR = os.path.join(FACE_MODULE_DIR, 'models')
 RECORDINGS_DIR = os.path.join(ROOT_DIR, 'data', 'recordings')
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 
-# Initialize dlib components
-detector = dlib.get_frontal_face_detector()
-predictor = dlib.shape_predictor(os.path.join(MODELS_DIR, 'shape_predictor_68_face_landmarks.dat'))
-face_rec_model = dlib.face_recognition_model_v1(os.path.join(MODELS_DIR, 'dlib_face_recognition_resnet_model_v1.dat'))
-
-DETECTOR_MODE = os.environ.get('FACE_DETECTOR', 'auto')  # 'auto' | 'hog' | 'cnn'
-cnn_model_path = os.path.join(MODELS_DIR, 'mmod_human_face_detector.dat')
-cnn_detector = None
-if DETECTOR_MODE in ('auto', 'cnn') and os.path.exists(cnn_model_path):
-    try:
-        cnn_detector = dlib.cnn_face_detection_model_v1(cnn_model_path)
-    except Exception:
-        cnn_detector = None
-
-OVERLAY_ONLY = False  # Draw overlays on black background
+OVERLAY_ONLY_DEFAULT = False  # Draw overlays on black background
 
 # Database connection
 conn = open_db()
@@ -60,177 +45,92 @@ try:
 except Exception:
     _oled = None
 
-CAMERA_BACKEND = os.environ.get('CAMERA_BACKEND', 'auto')
-CAMERA_INDEX = int(os.environ.get('CAMERA_INDEX', '0'))
-
-
-def _try_open_opencv_device(index: int, w: int, h: int, fps: int):
-    cap = cv2.VideoCapture(index)
-    if not cap.isOpened():
-        if platform.system() == 'Darwin':
-            cap2 = cv2.VideoCapture(index, cv2.CAP_AVFOUNDATION)
-            if cap2.isOpened():
-                cap2.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-                cap2.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-                cap2.set(cv2.CAP_PROP_FPS, fps)
-                ok, _ = cap2.read()
-                if ok:
-                    print(f"Camera: Opened via OpenCV AVFoundation (device index {index})")
-                    return cap2
-                cap2.release()
-        return None
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-    cap.set(cv2.CAP_PROP_FPS, fps)
-    ok, _ = cap.read()
-    if ok:
-        print(f"Camera: Opened via OpenCV (device index {index})")
-        return cap
-    cap.release()
-    return None
-
-
-def _try_open_gstreamer_libcamera(w: int, h: int, fps: int):
-    pipeline = (
-        f"libcamerasrc ! video/x-raw, width={w}, height={h}, framerate={fps}/1, format=RGB "
-        f"! videoconvert ! video/x-raw, format=RGB ! appsink"
-    )
-    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
-    if not cap.isOpened():
-        return None
-
-    class GstCameraCapture:
-        def __init__(self, base_cap):
-            self._cap = base_cap
-
-        def isOpened(self):
-            return self._cap.isOpened()
-
-        def read(self):
-            ok, frame = self._cap.read()
-            if not ok:
-                return ok, frame
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            return True, frame
-
-        def release(self):
-            try:
-                self._cap.release()
-            except Exception:
-                pass
-
-    ok, _ = cap.read()
-    if not ok:
-        cap.release()
-        return None
-    print("Camera: Opened via GStreamer libcamera pipeline")
-    return GstCameraCapture(cap)
-
-
-def _try_open_picamera2(w: int, h: int):
-    try:
-        from picamera2 import Picamera2
-
-        class PiCam2Capture:
-            def __init__(self, width: int, height: int):
-                self._picam2 = Picamera2()
-                config = self._picam2.create_preview_configuration(
-                    main={"size": (width, height), "format": "RGB888"}
-                )
-                self._picam2.configure(config)
-                self._picam2.start()
-
-            def read(self):
-                arr = self._picam2.capture_array()  # RGB
-                frame = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-                return True, frame
-
-            def isOpened(self):
-                return True
-
-            def release(self):
-                self._picam2.stop()
-                try:
-                    self._picam2.close()
-                except Exception:
-                    pass
-
-        print("Camera: Using Picamera2 fallback")
-        return PiCam2Capture(w, h)
-    except Exception:
-        return None
-
-
-def open_camera(preferred_width: int = 640, preferred_height: int = 480, preferred_fps: int = 30):
-    backend = CAMERA_BACKEND.lower().strip()
-
-    def try_sequence(seq):
-        for name in seq:
-            if name == 'opencv':
-                cap = _try_open_opencv_device(CAMERA_INDEX, preferred_width, preferred_height, preferred_fps)
-                if cap is not None:
-                    return cap
-            elif name == 'gstreamer':
-                cap = _try_open_gstreamer_libcamera(preferred_width, preferred_height, preferred_fps)
-                if cap is not None:
-                    return cap
-            elif name == 'picamera2':
-                cap = _try_open_picamera2(preferred_width, preferred_height)
-                if cap is not None:
-                    return cap
-        return None
-
-    if backend == 'opencv':
-        return try_sequence(['opencv'])
-    elif backend == 'gstreamer':
-        return try_sequence(['gstreamer'])
-    elif backend == 'picamera2':
-        return try_sequence(['picamera2'])
-    else:
-        return try_sequence(['opencv', 'gstreamer', 'picamera2'])
+def parse_args():
+    p = argparse.ArgumentParser(description="TrueVision runtime")
+    # Camera flags
+    p.add_argument('--camera-backend', default=os.environ.get('CAMERA_BACKEND', 'auto'), choices=['auto','opencv','gstreamer','picamera2'])
+    p.add_argument('--camera-index', type=int, default=int(os.environ.get('CAMERA_INDEX', '0')))
+    p.add_argument('--camera-width', type=int, default=640)
+    p.add_argument('--camera-height', type=int, default=480)
+    p.add_argument('--camera-fps', type=int, default=30)
+    # Face recognizer flags
+    p.add_argument('--face-detector', default=os.environ.get('FACE_DETECTOR', 'auto'), choices=['auto','hog','cnn'])
+    p.add_argument('--match-threshold', type=float, default=0.6)
+    p.add_argument('--quality-min-var', type=float, default=120.0)
+    p.add_argument('--diversity-min-dist', type=float, default=0.20)
+    p.add_argument('--add-cooldown-sec', type=float, default=5.0)
+    p.add_argument('--template-verbose', action='store_true', help='Verbose logs for template add/skip decisions')
+    p.add_argument('--absence-grace-sec', type=float, default=2.0)
+    # Transcription flags
+    p.add_argument('--whisper-model', default=os.environ.get('WHISPER_MODEL', 'tiny'))
+    p.add_argument('--caption-interval', type=float, default=0.7, help='Seconds between caption updates')
+    p.add_argument('--caption-max-words', type=int, default=30)
+    p.add_argument('--caption-max-lines', type=int, default=2)
+    # UI/overlay flags
+    p.add_argument('--overlay-only', action='store_true', default=OVERLAY_ONLY_DEFAULT)
+    # Audio enable/disable flags
+    p.add_argument('--audio', dest='audio', action='store_true', default=True, help='Enable audio recording/transcription (default)')
+    p.add_argument('--no-audio', dest='audio', action='store_false', help='Disable audio recording/transcription for performance')
+    # Summary flags
+    p.add_argument('--summary-async', action='store_true', help='Compute meeting summaries in a background thread')
+    p.add_argument('--summary-max-sentences', type=int, default=5)
+    return p.parse_args()
 
 
 def recognize_face():
-    cap = open_camera()
+    args = parse_args()
+    cap = open_camera(args.camera_backend, args.camera_index, args.camera_width, args.camera_height, args.camera_fps)
     if cap is None:
         print("ERROR: Could not open any camera. On Raspberry Pi, ensure libcamera works (try: libcamera-hello).\n"
               "Install either python3-opencv with GStreamer support, or python3-picamera2.")
         return
     print("Press 'q' to quit.")
-    print("Press 't' to toggle transcription on/off (default: ON).")
+    if args.audio:
+        print("Press 't' to toggle transcription on/off (default: ON).")
+    else:
+        print("Audio disabled (--no-audio). Transcription is OFF.")
 
     presence_state = {}
     last_detected_ts = {}
-    ABSENCE_GRACE_SEC = 2.0
+    ABSENCE_GRACE_SEC = args.absence_grace_sec
 
-    last_added_ts = {}
-    ADD_COOLDOWN_SEC = 5.0
-    DIVERSITY_MIN_DIST = 0.20
-    QUALITY_MIN_VAR = 120.0
+    # Recognizer
+    recog = Recognizer(RecognizerConfig(
+        models_dir=MODELS_DIR,
+        detector_mode=args.face_detector,
+        match_threshold=args.match_threshold,
+        quality_min_var=args.quality_min_var,
+        diversity_min_dist=args.diversity_min_dist,
+        add_cooldown_sec=args.add_cooldown_sec,
+        verbose=bool(getattr(args, 'template_verbose', False)),
+    ))
 
-    transcription_enabled = True
+    transcription_enabled = args.audio
     active_recorders = {}
     active_meetings = {}
     live_captions = {}
-    last_live_update = {}
     Recorder = None
     Transcriber = None
-    summarize_text = lambda txt: ''
-    try:
-        from audio_analysis.transcription import (
-            Recorder as _Recorder,
-            Transcriber as _Transcriber,
-            summarize_text as _summarize_text,
-        )
-        Recorder, Transcriber, summarize_text = _Recorder, _Transcriber, _summarize_text
-    except Exception as e:
-        print(f"WARNING: Transcription modules unavailable ({e}). Transcription disabled.")
-        transcription_enabled = False
+    def summarize_text(txt: str, max_sentences: int = 5) -> str:
+        return ''
+    if transcription_enabled:
+        try:
+            from audio_analysis.transcription import (
+                Recorder as _Recorder,
+                Transcriber as _Transcriber,
+                summarize_text as _summarize_text,
+            )
+            Recorder, Transcriber, summarize_text = _Recorder, _Transcriber, _summarize_text
+        except Exception as e:
+            print(f"WARNING: Transcription modules unavailable ({e}). Transcription disabled.")
+            transcription_enabled = False
+    else:
+        print("INFO: Skipping audio subsystem initialization (disabled by flag).")
 
     transcriber: Optional[object] = None
     if transcription_enabled and Transcriber is not None:
         try:
-            transcriber = Transcriber(model_size=os.environ.get('WHISPER_MODEL', 'tiny'))
+            transcriber = Transcriber(model_size=args.whisper_model)
         except Exception as e:
             print(f"WARNING: Transcriber initialization failed ({e}). Transcription disabled.")
             transcription_enabled = False
@@ -266,52 +166,16 @@ def recognize_face():
         if not ret:
             break
 
-        display_frame = np.zeros_like(frame) if OVERLAY_ONLY else frame.copy()
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        if cnn_detector is not None and DETECTOR_MODE in ('auto', 'cnn'):
-            dets = cnn_detector(gray, 1)
-            faces = [d.rect for d in dets]
-        else:
-            faces = detector(gray)
+        display_frame = np.zeros_like(frame) if args.overlay_only else frame.copy()
 
         recognized_ids_in_frame = set()
-
-        cursor.execute(
-            """
-            SELECT fe.face_id, f.name, fe.embedding, f.seen_count, f.last_seen_at
-            FROM face_embeddings fe
-            JOIN faces f ON f.id = fe.face_id
-            """
-        )
-        rows = cursor.fetchall()
-        embeddings_by_person = {}
-        meta_by_person = {}
-        for person_id, name, db_embedding, db_seen_count, db_last_seen_at in rows:
-            emb = np.frombuffer(db_embedding, dtype=np.float64)
-            embeddings_by_person.setdefault(person_id, []).append(emb)
-            meta_by_person[person_id] = (name, db_seen_count, db_last_seen_at)
-
-        for face in faces:
-            landmarks = predictor(gray, face)
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            emb_live = np.array(face_rec_model.compute_face_descriptor(frame_rgb, landmarks))
-
-            recognized_name = "Unknown"
-            recognized_id = None
-            recognized_seen_count = None
-            recognized_last_seen_str = None
-            min_distance = float("inf")
-
-            for person_id, person_embs in embeddings_by_person.items():
-                for db_emb in person_embs:
-                    distance = np.linalg.norm(emb_live - db_emb)
-                    if distance < 0.6 and distance < min_distance:
-                        name, db_seen_count, db_last_seen_at = meta_by_person.get(person_id, ("Unknown", None, None))
-                        recognized_name = name
-                        recognized_id = person_id
-                        recognized_seen_count = db_seen_count
-                        recognized_last_seen_str = db_last_seen_at
-                        min_distance = distance
+        faces_info = recog.detect_and_recognize(conn, frame)
+        for info in faces_info:
+            x, y, w, h = info.rect
+            recognized_id = info.person_id
+            recognized_name = info.name
+            recognized_seen_count = info.seen_count
+            recognized_last_seen_str = info.last_seen_at
 
             if recognized_id is not None:
                 now_ts = time.time()
@@ -320,11 +184,7 @@ def recognize_face():
                 last_detected_ts[recognized_id] = now_ts
 
                 if prev_state != 'present':
-                    cursor.execute(
-                        "UPDATE faces SET last_seen_at = datetime('now'), seen_count = seen_count + 1 WHERE id = ?",
-                        (recognized_id,),
-                    )
-                    conn.commit()
+                    recog.update_seen(conn, recognized_id)
                     presence_state[recognized_id] = 'present'
                     if recognized_seen_count is not None:
                         recognized_seen_count += 1
@@ -344,42 +204,11 @@ def recognize_face():
                 else:
                     presence_state[recognized_id] = 'present'
 
-                x, y, w, h = (face.left(), face.top(), face.width(), face.height())
-                x0, y0 = max(0, x), max(0, y)
-                x1, y1 = min(frame.shape[1], x + w), min(frame.shape[0], y + h)
-                face_gray = gray[y0:y1, x0:x1]
-                quality = None
-                if face_gray.size > 0:
-                    quality = float(cv2.Laplacian(face_gray, cv2.CV_64F).var())
+                # Adaptive template add
+                if recognized_id is not None and info.embedding is not None:
+                    if recog.maybe_add_embedding(conn, recognized_id, info.embedding, info.quality):
+                        prune_embeddings_if_needed(conn, recognized_id, MAX_TEMPLATES_PER_PERSON)
 
-                now_add = time.time()
-                can_add = (
-                    quality is not None and quality >= QUALITY_MIN_VAR and
-                    (now_add - last_added_ts.get(recognized_id, 0.0)) >= ADD_COOLDOWN_SEC
-                )
-
-                if can_add:
-                    person_embs = embeddings_by_person.get(recognized_id, [])
-                    is_diverse = True
-                    if person_embs:
-                        dists = [np.linalg.norm(emb_live - e) for e in person_embs]
-                        min_person_dist = min(dists)
-                        is_diverse = min_person_dist >= DIVERSITY_MIN_DIST
-
-                    if is_diverse:
-                        try:
-                            cursor.execute(
-                                "INSERT INTO face_embeddings (face_id, embedding, created_at, quality) VALUES (?, ?, datetime('now'), ?)",
-                                (recognized_id, emb_live.astype(np.float64).tobytes(), quality),
-                            )
-                            conn.commit()
-                            last_added_ts[recognized_id] = now_add
-                            embeddings_by_person.setdefault(recognized_id, []).append(emb_live)
-                            prune_embeddings_if_needed(conn, recognized_id, MAX_TEMPLATES_PER_PERSON)
-                        except Exception:
-                            pass
-
-            x, y, w, h = (face.left(), face.top(), face.width(), face.height())
             cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
             label = recognized_name
             if recognized_id is not None and recognized_seen_count is not None:
@@ -393,76 +222,45 @@ def recognize_face():
 
         # Live transcription overlay (closed captioning)
         if transcription_enabled and transcriber is not None and active_recorders:
-            now = time.time()
-            for pid, rec in list(active_recorders.items()):
-                audio_path = rec.audio_path
-                if not audio_path:
-                    continue
-                last_ts = last_live_update.get(pid, 0.0)
-                if (now - last_ts) >= 0.7:  # throttle updates (more frequent)
-                    try:
-                        text_live = transcriber.transcribe(audio_path)
-                        last_live_update[pid] = now
-                        # Keep only a short tail for overlay
-                        tail = text_live.strip().split()
-                        tail_txt = " ".join(tail[-30:])  # ~ last few words
-                        live_captions[pid] = tail_txt
-                        # Optionally persist incremental transcript to DB
-                        mid = active_meetings.get(pid)
-                        if mid is not None and text_live:
-                            cursor.execute(
-                                "UPDATE meetings SET transcript = ? WHERE id = ?",
-                                (text_live, mid),
-                            )
-                            conn.commit()
-                    except Exception:
-                        pass
-            # Draw the most recent caption for any present person at bottom
-            if live_captions:
-                caption = None
-                # Prefer caption of someone currently present
-                for pid, state in presence_state.items():
-                    if state == 'present' and pid in live_captions:
-                        caption = live_captions.get(pid)
-                        break
-                if caption is None:
-                    # fallback to any caption
-                    caption = next(iter(live_captions.values()))
-                if caption:
-                    # Wrap caption text to fit window width
-                    img_h, img_w = display_frame.shape[0], display_frame.shape[1]
-                    margin = 10
-                    font = cv2.FONT_HERSHEY_SIMPLEX
-                    font_scale = 0.6
-                    thickness = 2
+            from audio_analysis.live_caption import LiveCaptioner, CaptionConfig
+            # Initialize once and cache on function attribute
+            if not hasattr(recognize_face, "_captioner"):
+                recognize_face._captioner = LiveCaptioner(transcriber, CaptionConfig(interval_sec=args.caption_interval, max_words=args.caption_max_words))
+            captioner = recognize_face._captioner  # type: ignore[attr-defined]
+            captioner.update(active_recorders, active_meetings, cursor)
+            caption = captioner.get_caption_for_present(presence_state)
+            # Draw captions at bottom, wrap to fit
+            if caption:
+                img_h, img_w = display_frame.shape[0], display_frame.shape[1]
+                margin = 10
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 0.6
+                thickness = 2
+                words = caption.split()
+                lines = []
+                current = ""
+                for w in words:
+                    test = (current + (" " if current else "") + w)
+                    ((tw, _th), _) = cv2.getTextSize(test, font, font_scale, thickness)
+                    if tw + margin*2 <= img_w:
+                        current = test
+                    else:
+                        if current:
+                            lines.append(current)
+                        current = w
+                if current:
+                    lines.append(current)
+                lines = lines[-int(args.caption_max_lines):]
+                line_height = int(cv2.getTextSize("Ag", font, font_scale, thickness)[0][1] * 1.6)
+                box_height = line_height * len(lines) + margin*2
+                y0 = max(0, img_h - box_height)
+                cv2.rectangle(display_frame, (0, y0), (img_w, img_h), (0, 0, 0), -1)
+                y = y0 + margin + int(line_height * 0.8)
+                for ln in lines:
+                    cv2.putText(display_frame, ln, (margin, y), font, font_scale, (255, 255, 255), thickness)
+                    y += line_height
 
-                    words = caption.split()
-                    lines = []
-                    current = ""
-                    for w in words:
-                        test = (current + (" " if current else "") + w)
-                        ((tw, th), _) = cv2.getTextSize(test, font, font_scale, thickness)
-                        if tw + margin*2 <= img_w:
-                            current = test
-                        else:
-                            if current:
-                                lines.append(current)
-                            current = w
-                    if current:
-                        lines.append(current)
-
-                    # Limit lines to 2 for compactness
-                    lines = lines[-2:]
-                    line_height = int(cv2.getTextSize("Ag", font, font_scale, thickness)[0][1] * 1.6)
-                    box_height = line_height * len(lines) + margin*2
-                    y0 = max(0, img_h - box_height)
-                    cv2.rectangle(display_frame, (0, y0), (img_w, img_h), (0, 0, 0), -1)
-                    y = y0 + margin + int(line_height * 0.8)
-                    for ln in lines:
-                        cv2.putText(display_frame, ln, (margin, y), font, font_scale, (255, 255, 255), thickness)
-                        y += line_height
-
-        if _oled and len(faces) == 0 and all(v != 'present' for v in presence_state.values()):
+        if _oled and len(faces_info) == 0 and all(v != 'present' for v in presence_state.values()):
             _oled_idle()
 
         now_ts = time.time()
@@ -475,19 +273,61 @@ def recognize_face():
                         rec = active_recorders.pop(pid)
                         meeting_id = active_meetings.pop(pid, None)
                         audio_path_final = rec.stop()
-                        if meeting_id is not None and audio_path_final and transcription_enabled and transcriber is not None:
-                            try:
-                                transcript_text = transcriber.transcribe(audio_path_final)
-                            except Exception as e:
-                                print(f"Transcription failed: {e}")
-                                transcript_text = ''
-                            # Summary can be backfilled later; compute now if lightweight
-                            summary_text = summarize_text(transcript_text)
+                        if meeting_id is not None:
+                            # Compute transcript synchronously (if possible) so text appears quickly
+                            transcript_text = None
+                            if audio_path_final and transcription_enabled and transcriber is not None:
+                                try:
+                                    transcript_text = transcriber.transcribe(audio_path_final)
+                                except Exception as e:
+                                    print(f"Transcription failed: {e}")
+                                    transcript_text = None
+
+                            # Fallback to existing incremental transcript
+                            if transcript_text is None:
+                                cursor.execute("SELECT COALESCE(transcript,'') FROM meetings WHERE id = ?", (meeting_id,))
+                                (existing_transcript,) = cursor.fetchone() or ('',)
+                                transcript_text = existing_transcript or ''
+
+                            # Always set ended_at and transcript now
                             cursor.execute(
-                                "UPDATE meetings SET ended_at = datetime('now'), transcript = ?, summary = ? WHERE id = ?",
-                                (transcript_text, summary_text, meeting_id),
+                                "UPDATE meetings SET ended_at = datetime('now'), transcript = ? WHERE id = ?",
+                                (transcript_text, meeting_id),
                             )
                             conn.commit()
+
+                            # Summary: async if requested, else synchronous
+                            if getattr(args, 'summary_async', False):
+                                import threading
+
+                                def _bg_summarize(mid: int, db_path: str, text: str, max_sent: int):
+                                    try:
+                                        from data_access.db import open_db as _open_db
+                                        from audio_analysis.transcription import summarize_text as _summ
+                                        c2 = _open_db(db_path)
+                                        cur2 = c2.cursor()
+                                        summary = _summ(text, max_sentences=max_sent)
+                                        cur2.execute(
+                                            "UPDATE meetings SET summary = ? WHERE id = ?",
+                                            (summary, mid),
+                                        )
+                                        c2.commit()
+                                        c2.close()
+                                    except Exception as _e:
+                                        print(f"Background summary failed: {_e}")
+
+                                t = threading.Thread(target=_bg_summarize, args=(meeting_id, DB_PATH_DEFAULT, transcript_text, int(getattr(args, 'summary_max_sentences', 5)))),
+                                # unpack tuple accidental trailing comma avoidance
+                                t = t[0]
+                                t.daemon = True
+                                t.start()
+                            else:
+                                summary_text = summarize_text(transcript_text, max_sentences=args.summary_max_sentences)
+                                cursor.execute(
+                                    "UPDATE meetings SET summary = ? WHERE id = ?",
+                                    (summary_text, meeting_id),
+                                )
+                                conn.commit()
                     if _oled and all(v == 'absent' for v in presence_state.values()):
                         _oled_idle()
 

@@ -65,10 +65,7 @@ class _LumaDisplay:
 
 
 def _try_build_luma_display() -> Optional[_LumaDisplay]:
-    # Guard: enabled?
-    enabled = os.environ.get("OLED", "0").lower() in ("1", "true", "yes", "on")
-    if not enabled:
-        return None
+    # Auto-detect: attempt to initialize if libraries and hardware are available.
     try:
         from luma.core.interface.serial import i2c
         from luma.oled.device import ssd1306, sh1106
