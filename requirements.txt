@@ -1,7 +1,8 @@
 # Top-level core dependencies for TrueVision
 # NOTE: On Raspberry Pi, install OpenCV and dlib via apt per facial_recognition/SETUP_PI.md.
 
-numpy==2.3.3
+# NumPy must be <2.0 for compatibility with matplotlib/scipy in this project
+numpy
 Pillow
 luma.oled
 sounddevice

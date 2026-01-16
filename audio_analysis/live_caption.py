@@ -23,6 +23,7 @@ class LiveCaptioner:
         for pid, rec in list(active_recorders.items()):
             audio_path = getattr(rec, 'audio_path', None)
             if not audio_path:
+                # No active file yet; skip
                 continue
             last_ts = self._last_update.get(pid, 0.0)
             if (now - last_ts) < self.cfg.interval_sec:
@@ -39,8 +40,9 @@ class LiveCaptioner:
                         "UPDATE meetings SET transcript = ? WHERE id = ?",
                         (text_live, mid),
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                # Surface issues to stdout to aid debugging
+                print(f"LiveCaptioner: transcription error for pid={pid}, path={audio_path}: {e}")
 
     def get_caption_for_present(self, presence_state: Dict[int, str]) -> Optional[str]:
         for pid, state in presence_state.items():

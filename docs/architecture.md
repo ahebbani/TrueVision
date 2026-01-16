@@ -39,6 +39,65 @@ flowchart TB
   DB --> Main
 ```
 
+## Hardware/Software Partition (RPi + ESP32 + Peripherals)
+
+```mermaid
+flowchart LR
+  %% Hardware peripherals
+  Camera[Camera Module<br/>Raw frames]
+  Mic[Digital Mic<br/>I2S]
+  OLED[Micro OLED<br/>HDMI or I2C/SSD1306]
+
+  subgraph ESP32[ESP32 - Firmware]
+    ESP_I2S[I2S capture<br/>DMA buffers]
+    ESP_UART[UART/USB link]
+    ESP_UI[Buttons / LEDs<br/>Privacy LED]
+    ESP_PWR[Power monitor<br/>ADC + MOSFET]
+  end
+
+  subgraph RPi[Raspberry Pi - Python App]
+    RPI_CAM[Camera backend<br/>OpenCV/GStreamer/Picamera2]
+    RPI_FR[Face Recognition<br/>dlib: detect → landmarks → 128-D embedding]
+    RPI_DB[SQLite DB<br/>faces, face_embeddings, meetings]
+    RPI_REC[Recorder<br/>sounddevice + soundfile]
+    RPI_ASR[Transcriber<br/>Whisper / faster-whisper]
+    RPI_SUM[Summarizer<br/>extractive]
+    RPI_OLED[OLED Service<br/>luma.oled]
+    RPI_UI[Mode control<br/>Audio-only / Video-only / Dual]
+    RPI_HDMI[RPi HDMI Output]
+  end
+
+  %% Physical/data links
+  Camera -->|raw frames| RPI_CAM
+  RPI_CAM --> RPI_FR
+  RPI_FR -->|embeddings + matches| RPI_DB
+
+  Mic -->|I2S| ESP_I2S
+  ESP_I2S --> ESP_UART
+  ESP_UART -->|PCM blocks| RPI_REC
+  RPI_REC -->|wav path| RPI_ASR
+  RPI_ASR -->|transcript| RPI_SUM
+  RPI_SUM -->|summary| RPI_DB
+
+  ESP_UI -->|mode buttons| RPI_UI
+  ESP_PWR -->|battery status| RPI_UI
+
+  RPI_FR -->|name, seen count, last seen| RPI_OLED
+  RPI_ASR -->|captions| RPI_OLED
+  RPI_OLED -->|I2C SSD1306| OLED
+  RPI_HDMI -.->|alternative path| OLED
+
+  %% Style classes
+  classDef hw fill:#e6f7ff,stroke:#66a3ff,color:#003366
+  classDef esp fill:#fff7e6,stroke:#ffb366,color:#663300
+  classDef rpi fill:#f0f8ff,stroke:#4169e1,color:#191970
+  
+  class Camera,Mic,OLED hw
+  class ESP32,ESP_I2S,ESP_UART,ESP_UI,ESP_PWR esp
+  class RPi,RPI_CAM,RPI_FR,RPI_DB,RPI_REC,RPI_ASR,RPI_SUM,RPI_OLED,RPI_UI,RPI_HDMI rpi
+```
+
+
 ## Subsystem diagrams and function-call sequences
 
 Below are per-subsystem diagrams with concise function-call sequences you can paste into your report or use to illustrate test cases and sequence diagrams.
