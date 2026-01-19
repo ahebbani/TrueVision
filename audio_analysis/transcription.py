@@ -13,6 +13,13 @@ try:
 except Exception:  # pragma: no cover
     WhisperModel = None  # type: ignore
 
+# ESP32 serial audio is optional
+try:
+    from audio_analysis.esp32_serial_audio import ESP32SerialAudioReceiver, ESP32SerialRecorder
+except Exception:  # pragma: no cover
+    ESP32SerialAudioReceiver = None  # type: ignore
+    ESP32SerialRecorder = None  # type: ignore
+
 
 class Recorder:
     """Simple WAV recorder using sounddevice in a background thread.
@@ -113,3 +120,46 @@ def summarize_text(text: str, max_sentences: int = 5) -> str:
     if not summary.endswith("."):
         summary += "."
     return summary
+
+
+def create_recorder(audio_source: str = "sounddevice", serial_port: str = "/dev/serial0", 
+                   serial_baud: int = 921600, sample_rate: int = 16000, 
+                   channels: int = 1) -> Recorder:
+    """Factory function to create appropriate recorder based on audio source.
+    
+    Args:
+        audio_source: "sounddevice" for local mic, "esp32-serial" for ESP32 via UART
+        serial_port: Serial port device (only used for esp32-serial)
+        serial_baud: Baud rate (only used for esp32-serial)
+        sample_rate: Audio sample rate
+        channels: Number of audio channels
+        
+    Returns:
+        Recorder instance (either standard Recorder or ESP32SerialRecorder)
+    """
+    if audio_source == "esp32-serial":
+        if ESP32SerialAudioReceiver is None or ESP32SerialRecorder is None:
+            raise RuntimeError(
+                "ESP32 serial audio not available. Install pyserial: pip install pyserial"
+            )
+        
+        # Create and start the serial receiver
+        receiver = ESP32SerialAudioReceiver(
+            port=serial_port,
+            baud_rate=serial_baud,
+            buffer_seconds=60.0
+        )
+        receiver.start()
+        
+        # Create recorder wrapper
+        recorder = ESP32SerialRecorder(
+            serial_receiver=receiver,
+            sample_rate=sample_rate,
+            channels=channels
+        )
+        
+        print(f"ESP32 Serial Audio: Recorder ready on {serial_port} at {serial_baud} baud")
+        return recorder
+    
+    else:  # Default to sounddevice
+        return Recorder(sample_rate=sample_rate, channels=channels)

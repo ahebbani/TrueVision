@@ -85,16 +85,32 @@ def _try_build_luma_display() -> Optional[_LumaDisplay]:
     except Exception:
         address = 0x3C
 
-    try:
-        serial = i2c(port=bus, address=address)
-        # Prefer SSD1306, but support SH1106 panels too via env OLED_DRIVER
-        driver = os.environ.get("OLED_DRIVER", "ssd1306").lower()
-        if driver == "sh1106":
-            device = sh1106(serial, width=width, height=height)
-        else:
-            device = ssd1306(serial, width=width, height=height)
-    except Exception as e:
-        print(f"OLED: failed to open I2C device ({e}); continuing without OLED.")
+    # Try multiple addresses: user-specified, 0x3C, then 0x3D
+    addresses_to_try = [address]
+    if address != 0x3C:
+        addresses_to_try.append(0x3C)
+    if address != 0x3D:
+        addresses_to_try.append(0x3D)
+
+    device = None
+    last_error = None
+    for addr in addresses_to_try:
+        try:
+            serial = i2c(port=bus, address=addr)
+            # Prefer SSD1306, but support SH1106 panels too via env OLED_DRIVER
+            driver = os.environ.get("OLED_DRIVER", "ssd1306").lower()
+            if driver == "sh1106":
+                device = sh1106(serial, width=width, height=height)
+            else:
+                device = ssd1306(serial, width=width, height=height)
+            print(f"OLED: successfully connected at address 0x{addr:02X}")
+            break
+        except Exception as e:
+            last_error = e
+            continue
+
+    if device is None:
+        print(f"OLED: failed to open I2C device at any address ({last_error}); continuing without OLED.")
         return None
 
     # Font setup

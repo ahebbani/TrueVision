@@ -66,6 +66,11 @@ def parse_args():
     p.add_argument('--caption-interval', type=float, default=0.7, help='Seconds between caption updates')
     p.add_argument('--caption-max-words', type=int, default=30)
     p.add_argument('--caption-max-lines', type=int, default=2)
+    # Audio source flags
+    p.add_argument('--audio-source', default='sounddevice', choices=['sounddevice', 'esp32-serial'],
+                   help='Audio input source: sounddevice (local mic) or esp32-serial (ESP32 via UART)')
+    p.add_argument('--serial-port', default='/dev/serial0', help='Serial port for ESP32 audio (default: /dev/serial0)')
+    p.add_argument('--serial-baud', type=int, default=921600, help='Baud rate for ESP32 serial (default: 921600)')
     # UI/overlay flags
     p.add_argument('--overlay-only', action='store_true', default=OVERLAY_ONLY_DEFAULT)
     # Audio enable/disable flags
@@ -110,6 +115,7 @@ def recognize_face():
     active_meetings = {}
     live_captions = {}
     Recorder = None
+    create_recorder = None
     Transcriber = None
     def summarize_text(txt: str, max_sentences: int = 5) -> str:
         return ''
@@ -117,10 +123,11 @@ def recognize_face():
         try:
             from audio_analysis.transcription import (
                 Recorder as _Recorder,
+                create_recorder as _create_recorder,
                 Transcriber as _Transcriber,
                 summarize_text as _summarize_text,
             )
-            Recorder, Transcriber, summarize_text = _Recorder, _Transcriber, _summarize_text
+            Recorder, create_recorder, Transcriber, summarize_text = _Recorder, _create_recorder, _Transcriber, _summarize_text
         except Exception as e:
             print(f"WARNING: Transcription modules unavailable ({e}). Transcription disabled.")
             transcription_enabled = False
@@ -191,7 +198,14 @@ def recognize_face():
                     recognized_last_seen_str = "now"
                     _oled_show_person(recognized_name, recognized_seen_count, recognized_last_seen_str, transcription_enabled)
                     if transcription_enabled and recognized_id not in active_recorders:
-                        rec = Recorder()
+                        if create_recorder:
+                            rec = create_recorder(
+                                audio_source=args.audio_source,
+                                serial_port=args.serial_port,
+                                serial_baud=args.serial_baud
+                            )
+                        else:
+                            rec = Recorder()
                         audio_path_pending = rec.start(RECORDINGS_DIR, f"person{recognized_id}")
                         cursor.execute(
                             "INSERT INTO meetings (person_id, started_at, audio_path) VALUES (?, datetime('now'), ?)",
