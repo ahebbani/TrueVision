@@ -15,10 +15,19 @@ except Exception:  # pragma: no cover
 
 # ESP32 serial audio is optional
 try:
-    from audio_analysis.esp32_serial_audio import ESP32SerialAudioReceiver, ESP32SerialRecorder
+    from audio_analysis.esp32_serial_audio import (
+        ESP32SerialAudioReceiver,
+        ESP32SerialRecorder,
+        probe_esp32_uart_stream,
+    )
 except Exception:  # pragma: no cover
     ESP32SerialAudioReceiver = None  # type: ignore
     ESP32SerialRecorder = None  # type: ignore
+    probe_esp32_uart_stream = None  # type: ignore
+
+
+_shared_serial_receivers = {}
+_shared_serial_receivers_lock = threading.Lock()
 
 
 class Recorder:
@@ -137,19 +146,37 @@ def create_recorder(audio_source: str = "sounddevice", serial_port: str = "/dev/
     Returns:
         Recorder instance (either standard Recorder or ESP32SerialRecorder)
     """
+    if audio_source == "auto":
+        # Prefer ESP32 UART stream if present; fall back to local sounddevice.
+        if probe_esp32_uart_stream is not None:
+            if probe_esp32_uart_stream(port=serial_port, baud_rate=serial_baud, timeout_sec=1.0):
+                audio_source = "esp32-serial"
+            else:
+                audio_source = "sounddevice"
+        else:
+            audio_source = "sounddevice"
+
     if audio_source == "esp32-serial":
         if ESP32SerialAudioReceiver is None or ESP32SerialRecorder is None:
             raise RuntimeError(
                 "ESP32 serial audio not available. Install pyserial: pip install pyserial"
             )
         
-        # Create and start the serial receiver
-        receiver = ESP32SerialAudioReceiver(
-            port=serial_port,
-            baud_rate=serial_baud,
-            buffer_seconds=60.0
-        )
-        receiver.start()
+        # Reuse a single shared serial receiver per (port, baud). UART is a single stream.
+        key = (serial_port, int(serial_baud))
+        with _shared_serial_receivers_lock:
+            receiver = _shared_serial_receivers.get(key)
+            if receiver is None:
+                receiver = ESP32SerialAudioReceiver(
+                    port=serial_port,
+                    baud_rate=serial_baud,
+                    buffer_seconds=60.0,
+                )
+                receiver.start()
+                _shared_serial_receivers[key] = receiver
+            else:
+                if not receiver.is_receiving():
+                    receiver.start()
         
         # Create recorder wrapper
         recorder = ESP32SerialRecorder(

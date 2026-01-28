@@ -41,9 +41,19 @@
 #define I2S_CHANNELS      1  // Mono
 
 // I2S Pins
-#define I2S_SCK_PIN       14  // Serial Clock (BCLK)
-#define I2S_WS_PIN        15  // Word Select (LRCLK/WS)
-#define I2S_SD_PIN        32  // Serial Data (DOUT)
+// NOTE: These defaults avoid ESP32 strapping pins.
+// Change if needed to match your wiring.
+#define I2S_SCK_PIN       26  // Serial Clock (BCLK)
+#define I2S_WS_PIN        25  // Word Select (LRCLK/WS)
+#define I2S_SD_PIN        33  // Serial Data (DOUT)
+
+// Many I2S mics (including SPH0645) output 24-bit audio in 32-bit frames.
+// Adjust if your audio is too quiet/loud: common values are 11, 13, 14, 16.
+#define SAMPLE_SHIFT      14
+
+// If your mic has SEL/LR pin: SEL=GND usually outputs LEFT, SEL=3V3 outputs RIGHT.
+// Match this to how you wired SEL.
+#define I2S_CHANNEL_FORMAT I2S_CHANNEL_FMT_ONLY_LEFT
 
 // Audio Buffer Configuration
 #define BUFFER_SIZE       512  // Samples per packet (32ms at 16kHz)
@@ -78,7 +88,7 @@ void setup() {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
     .sample_rate = I2S_SAMPLE_RATE,
     .bits_per_sample = I2S_BITS_PER_SAMPLE,
-    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,  // Mono - only left channel
+    .channel_format = I2S_CHANNEL_FORMAT,  // Mono - pick left/right to match SEL
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
     .dma_buf_count = DMA_BUFFER_COUNT,
@@ -140,7 +150,7 @@ void loop() {
     // Shift right to get 16-bit data from 32-bit (discard lower bits)
     // Adjust shift amount based on your specific microphone
     // Common values: >> 14, >> 16, or >> 11
-    audio_buffer[i] = (int16_t)(i2s_read_buffer[i] >> 14);
+    audio_buffer[i] = (int16_t)(i2s_read_buffer[i] >> SAMPLE_SHIFT);
   }
   
   // Build UART packet

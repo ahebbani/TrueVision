@@ -35,6 +35,49 @@ except ImportError:
     serial = None  # type: ignore
 
 
+def probe_esp32_uart_stream(port: str = '/dev/serial0', baud_rate: int = 921600, timeout_sec: float = 1.0) -> bool:
+    """Return True if the ESP32 audio stream appears present on the UART.
+
+    This is a best-effort probe used for auto-selecting audio source.
+    It looks for the framing sync bytes 0xAA 0x55 in incoming data.
+    """
+    if serial is None:
+        return False
+
+    try:
+        ser = serial.Serial(
+            port=port,
+            baudrate=int(baud_rate),
+            bytesize=serial.EIGHTBITS,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE,
+            timeout=0.05,
+        )
+    except Exception:
+        return False
+
+    sync = bytes([ESP32SerialAudioReceiver.SYNC_BYTE_1, ESP32SerialAudioReceiver.SYNC_BYTE_2])
+    buf = bytearray()
+    deadline = time.time() + float(timeout_sec)
+    try:
+        while time.time() < deadline:
+            chunk = ser.read(4096)
+            if chunk:
+                buf.extend(chunk)
+                if sync in buf:
+                    return True
+                # keep buffer bounded
+                if len(buf) > 8192:
+                    buf = buf[-2048:]
+    finally:
+        try:
+            ser.close()
+        except Exception:
+            pass
+
+    return False
+
+
 class ESP32SerialAudioReceiver:
     """Receives and buffers audio from ESP32 via serial connection."""
     

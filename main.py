@@ -67,8 +67,8 @@ def parse_args():
     p.add_argument('--caption-max-words', type=int, default=30)
     p.add_argument('--caption-max-lines', type=int, default=2)
     # Audio source flags
-    p.add_argument('--audio-source', default='sounddevice', choices=['sounddevice', 'esp32-serial'],
-                   help='Audio input source: sounddevice (local mic) or esp32-serial (ESP32 via UART)')
+    p.add_argument('--audio-source', default='auto', choices=['auto', 'sounddevice', 'esp32-serial'],
+                   help='Audio input source: auto (prefer ESP32 UART if streaming), sounddevice (local mic), or esp32-serial (force ESP32 via UART)')
     p.add_argument('--serial-port', default='/dev/serial0', help='Serial port for ESP32 audio (default: /dev/serial0)')
     p.add_argument('--serial-baud', type=int, default=921600, help='Baud rate for ESP32 serial (default: 921600)')
     # UI/overlay flags
