@@ -41,11 +41,11 @@
 #define I2S_CHANNELS      1  // Mono
 
 // I2S Pins
-// NOTE: These defaults avoid ESP32 strapping pins.
+// NOTE: These defaults match the "free GPIO" mapping.
 // Change if needed to match your wiring.
-#define I2S_SCK_PIN       26  // Serial Clock (BCLK)
-#define I2S_WS_PIN        25  // Word Select (LRCLK/WS)
-#define I2S_SD_PIN        33  // Serial Data (DOUT)
+#define I2S_SCK_PIN       16  // Serial Clock (BCLK)
+#define I2S_WS_PIN        17  // Word Select (LRCLK/WS)
+#define I2S_SD_PIN        5   // Serial Data (DOUT)
 
 // Many I2S mics (including SPH0645) output 24-bit audio in 32-bit frames.
 // Adjust if your audio is too quiet/loud: common values are 11, 13, 14, 16.

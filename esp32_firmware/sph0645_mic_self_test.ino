@@ -11,9 +11,9 @@
  * Wiring (typical SPH0645 breakout):
  * - 3V3  -> ESP32 3V3
  * - GND  -> ESP32 GND
- * - BCLK -> ESP32 GPIO 26 (I2S BCLK)
- * - LRCL -> ESP32 GPIO 25 (I2S WS/LRCLK)
- * - DOUT -> ESP32 GPIO 33 (I2S DATA IN)
+ * - BCLK -> ESP32 GPIO 16 (I2S BCLK)
+ * - LRCL -> ESP32 GPIO 17 (I2S WS/LRCLK)
+ * - DOUT -> ESP32 GPIO 5  (I2S DATA IN)
  * - SEL/LR (if present) -> GND (LEFT)  OR  3V3 (RIGHT)
  *
  * Notes:
@@ -29,9 +29,9 @@
 #define BUFFER_SAMPLES      512
 
 // Choose I2S pins (avoid ESP32 strapping pins when possible)
-#define PIN_I2S_BCLK        26
-#define PIN_I2S_WS          25
-#define PIN_I2S_DIN         33
+#define PIN_I2S_BCLK        16
+#define PIN_I2S_WS          17
+#define PIN_I2S_DIN         5
 
 // Many I2S mics (including SPH0645) output 24-bit data inside 32-bit words.
 // Adjust if needed: common values are 11, 13, 14, 16.
