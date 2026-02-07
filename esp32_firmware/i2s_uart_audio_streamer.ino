@@ -148,8 +148,7 @@ void loop() {
   // Most I2S microphones output in the upper bits of 32-bit words
   for (size_t i = 0; i < samples_read && i < BUFFER_SIZE; i++) {
     // Shift right to get 16-bit data from 32-bit (discard lower bits)
-    // Adjust shift amount based on your specific microphone
-    // Common values: >> 14, >> 16, or >> 11
+    // Adjust shift amount
     audio_buffer[i] = (int16_t)(i2s_read_buffer[i] >> SAMPLE_SHIFT);
   }
   
