@@ -66,6 +66,25 @@ def parse_args():
     p.add_argument('--caption-interval', type=float, default=0.7, help='Seconds between caption updates')
     p.add_argument('--caption-max-words', type=int, default=30)
     p.add_argument('--caption-max-lines', type=int, default=2)
+    # Caption speech (TTS)
+    p.add_argument(
+        '--speak-captions',
+        action='store_true',
+        default=bool(int(os.environ.get('SPEAK_CAPTIONS', '0'))),
+        help='Speak generated live captions (best-effort; requires TTS backend)'
+    )
+    p.add_argument(
+        '--speech-rate',
+        type=int,
+        default=int(os.environ.get('SPEECH_RATE', '175')),
+        help='Speech rate in words per minute (backend-dependent)'
+    )
+    p.add_argument(
+        '--speech-volume',
+        type=float,
+        default=float(os.environ.get('SPEECH_VOLUME', '1.0')),
+        help='Speech volume 0.0-1.0 (backend-dependent)'
+    )
     # Audio source flags
     p.add_argument('--audio-source', default='auto', choices=['auto', 'sounddevice', 'esp32-serial'],
                    help='Audio input source: auto (prefer ESP32 UART if streaming), sounddevice (local mic), or esp32-serial (force ESP32 via UART)')
@@ -141,6 +160,25 @@ def recognize_face():
         except Exception as e:
             print(f"WARNING: Transcriber initialization failed ({e}). Transcription disabled.")
             transcription_enabled = False
+
+    # Optional caption speaker (TTS)
+    speaker = None
+    if getattr(args, 'speak_captions', False):
+        try:
+            from audio_analysis.caption_speaker import CaptionSpeaker, CaptionSpeakerConfig
+
+            speaker = CaptionSpeaker(
+                CaptionSpeakerConfig(
+                    enabled=True,
+                    rate_wpm=int(getattr(args, 'speech_rate', 175)),
+                    volume=float(getattr(args, 'speech_volume', 1.0)),
+                )
+            )
+            if not getattr(speaker, 'available', False):
+                print("WARNING: --speak-captions enabled but no TTS backend found (install pyttsx3 or espeak).")
+        except Exception as e:
+            print(f"WARNING: Caption speaker init failed ({e}). Speech disabled.")
+            speaker = None
 
     def _oled_show_person(name: str, seen_count: Optional[int], last_seen: Optional[str], rec: bool):
         if not _oled:
@@ -245,6 +283,11 @@ def recognize_face():
             caption = captioner.get_caption_for_present(presence_state)
             # Draw captions at bottom, wrap to fit
             if caption:
+                if speaker is not None:
+                    try:
+                        speaker.submit(caption)
+                    except Exception:
+                        pass
                 img_h, img_w = display_frame.shape[0], display_frame.shape[1]
                 margin = 10
                 font = cv2.FONT_HERSHEY_SIMPLEX
@@ -364,6 +407,11 @@ def recognize_face():
     except Exception:
         pass
     cv2.destroyAllWindows()
+    try:
+        if speaker is not None:
+            speaker.close()
+    except Exception:
+        pass
     try:
         if _oled:
             _oled.clear()

@@ -167,6 +167,72 @@ Press `q` to quit.
 - "No display" errors: you’re headless; see notes above.
 - Slow performance on CNN detector: use default HOG detector, reduce resolution, and avoid full-screen windows.
 
+## 9) Start on boot (systemd)
+
+The most reliable way to run on boot is a `systemd` service that executes `make run-no-audio`.
+
+### Option A (recommended): install the service using the repo script
+
+From the repo root on the Pi:
+
+```bash
+chmod +x scripts/install_truevision_systemd.sh
+sudo ./scripts/install_truevision_systemd.sh --user pi
+
+# Check status / logs
+systemctl status truevision --no-pager
+journalctl -u truevision -f
+```
+
+Notes:
+- If you created a venv at `.venv/`, the installer will automatically run using `.venv/bin/python3`.
+- If you’re headless (no desktop/HDMI), OpenCV’s `cv2.imshow()` can fail. In that case install a virtual display and install the service with `--xvfb`:
+
+```bash
+sudo apt install -y xvfb
+sudo ./scripts/install_truevision_systemd.sh --user pi --xvfb
+```
+
+### Option B: create the service manually
+
+1) Create the unit file:
+
+```bash
+sudo nano /etc/systemd/system/truevision.service
+```
+
+2) Paste (edit paths/user to match your Pi):
+
+```ini
+[Unit]
+Description=TrueVision (make run-no-audio)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/Files/TrueVision
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/make -C /home/pi/Files/TrueVision run-no-audio
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+```
+
+3) Enable and start it:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable truevision
+sudo systemctl start truevision
+
+systemctl status truevision --no-pager
+journalctl -u truevision -f
+```
+
 ### Fix: venv won’t create or activate
 
 Common causes and fixes:
