@@ -10,7 +10,8 @@ Usage:
 Options:
   --db <path>            Path to faces.db (default: data_access/faces.db)
   --limit <n>            Max meetings to process (default: 25)
-  --max-sentences <n>    Max sentences in summary (default: 5)
+    --max-sentences <n>    Max sentences in summary (default: 1)
+    --max-chars <n>        Clamp 1-sentence summaries to this many chars (default: 140)
   --force                Recompute summaries even if one already exists
 """
 from __future__ import annotations
@@ -25,14 +26,15 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from data_access.db import open_db, DB_PATH as DB_PATH_DEFAULT
-from audio_analysis.transcription import summarize_text
+from audio_analysis.transcription import summarize_one_sentence, summarize_text
 
 
 def main():
     p = argparse.ArgumentParser(description="Summarize meetings from transcripts")
     p.add_argument('--db', default=DB_PATH_DEFAULT, help='Path to faces.db (default: %(default)s)')
     p.add_argument('--limit', type=int, default=25, help='Max meetings to process (default: %(default)s)')
-    p.add_argument('--max-sentences', type=int, default=5, help='Max sentences in summary (default: %(default)s)')
+    p.add_argument('--max-sentences', type=int, default=1, help='Max sentences in summary (default: %(default)s)')
+    p.add_argument('--max-chars', type=int, default=140, help='Clamp 1-sentence summaries to this many chars (default: %(default)s)')
     p.add_argument('--force', action='store_true', help='Recompute summaries even if present')
     args = p.parse_args()
 
@@ -73,7 +75,10 @@ def main():
     for mid, transcript in rows:
         if not transcript:
             continue
-        summary = summarize_text(transcript, max_sentences=args.max_sentences)
+        if int(args.max_sentences) <= 1:
+            summary = summarize_one_sentence(transcript, max_chars=int(args.max_chars))
+        else:
+            summary = summarize_text(transcript, max_sentences=args.max_sentences)
         cur.execute(
             "UPDATE meetings SET summary = ? WHERE id = ?",
             (summary, mid),

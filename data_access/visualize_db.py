@@ -47,6 +47,7 @@ def summarize_db(conn: sqlite3.Connection, limit_meetings: int = 10):
             (
                 """
                 SELECT m.id, m.person_id, f.name, m.started_at, m.ended_at,
+                       COALESCE(m.transcript, '') as transcript,
                        COALESCE(LENGTH(m.transcript), 0) as tlen,
                        COALESCE(m.summary, '') as summary,
                        m.audio_path
@@ -62,7 +63,7 @@ def summarize_db(conn: sqlite3.Connection, limit_meetings: int = 10):
     return faces, emb_stats, meetings
 
 
-def print_console(faces, emb_stats, meetings):
+def print_console(faces, emb_stats, meetings, show_text: bool = False):
     print("\n=== Faces ===")
     if not faces:
         print("(none)")
@@ -79,7 +80,7 @@ def print_console(faces, emb_stats, meetings):
         print("(none)")
     else:
         print(f"{'ID':>3}  {'Person':<20}  {'Start':<19}  {'End':<19}  {'Transcript chars':>16}  {'Audio':<30}")
-        for mid, pid, name, started_at, ended_at, tlen, summary, audio_path in meetings:
+        for mid, pid, name, started_at, ended_at, transcript, tlen, summary, audio_path in meetings:
             name = name or f"person {pid}"
             start = started_at or '—'
             end = ended_at or '—'
@@ -88,10 +89,21 @@ def print_console(faces, emb_stats, meetings):
                 audio = '…' + audio[-27:]
             print(f"{mid:>3}  {name:<20}  {start:<19}  {end:<19}  {tlen:>16}  {audio:<30}")
 
+            if show_text:
+                s = (summary or '').strip()
+                t = (transcript or '').strip()
+                print(f"      Summary: {s if s else '—'}")
+                if t:
+                    print("      Transcript:")
+                    for ln in t.splitlines():
+                        print(f"        {ln}")
+                else:
+                    print("      Transcript: —")
+
     print("\nTip: run with --html to generate an HTML report under docs/\n")
 
 
-def write_html(faces, emb_stats, meetings, out_path: str):
+def write_html(faces, emb_stats, meetings, out_path: str, include_transcripts: bool = True):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
     def esc(s: Any) -> str:
@@ -106,9 +118,26 @@ def write_html(faces, emb_stats, meetings, out_path: str):
         )
 
     rows_meet = []
-    for mid, pid, name, started_at, ended_at, tlen, summary, audio_path in meetings:
+    disabled_html = "<span class='muted'>(disabled)</span>"
+    for mid, pid, name, started_at, ended_at, transcript, tlen, summary, audio_path in meetings:
+        transcript_html = ""
+        if include_transcripts:
+            t = esc(transcript)
+            transcript_html = (
+                f"<details><summary class='nowrap'>view ({tlen} chars)</summary>"
+                f"<pre style='white-space:pre-wrap; margin:8px 0 0'>{t}</pre></details>"
+            )
         rows_meet.append(
-            f"<tr><td>{mid}</td><td>{esc(name) or f'person {pid}'}</td><td>{esc(started_at) or '—'}</td><td>{esc(ended_at) or '—'}</td><td>{tlen}</td><td>{esc(audio_path) or '—'}</td><td>{esc(summary)[:160]}</td></tr>"
+            "<tr>"
+            f"<td>{mid}</td>"
+            f"<td>{esc(name) or f'person {pid}'}</td>"
+            f"<td class='nowrap'>{esc(started_at) or '—'}</td>"
+            f"<td class='nowrap'>{esc(ended_at) or '—'}</td>"
+            f"<td>{tlen}</td>"
+            f"<td>{esc(audio_path) or '—'}</td>"
+            f"<td>{esc(summary) or '—'}</td>"
+            f"<td>{transcript_html if transcript_html else disabled_html}</td>"
+            "</tr>"
         )
 
     html = f"""
@@ -145,11 +174,11 @@ def write_html(faces, emb_stats, meetings, out_path: str):
 <h2>Recent Meetings</h2>
 <table>
 <thead>
-<tr><th>ID</th><th>Person</th><th>Start</th><th>End</th><th>Transcript Chars</th><th>Audio</th><th>Summary (preview)</th></tr>
+<tr><th>ID</th><th>Person</th><th>Start</th><th>End</th><th>Transcript Chars</th><th>Audio</th><th>Summary</th><th>Transcript</th></tr>
 </thead>
 <tbody>
 {''.join(rows_meet)}
-<\tbody>
+</tbody>
 </table>
 
 <p><small>Report path: {esc(out_path)}</small></p>
@@ -166,6 +195,8 @@ def main():
     parser.add_argument('--db', default=DB_PATH_DEFAULT, help='Path to faces.db (default: %(default)s)')
     parser.add_argument('--limit', type=int, default=10, help='Number of recent meetings to show (default: %(default)s)')
     parser.add_argument('--html', action='store_true', help='Generate HTML report in docs/')
+    parser.add_argument('--show-text', action='store_true', help='Print full transcript + summary in console output')
+    parser.add_argument('--no-transcripts', action='store_true', help='In HTML mode, omit transcripts (smaller report)')
     args = parser.parse_args()
 
     if not os.path.exists(args.db):
@@ -178,10 +209,10 @@ def main():
 
     if args.html:
         out_path = DOCS_REPORT_PATH
-        write_html(faces, emb_stats, meetings, out_path)
+        write_html(faces, emb_stats, meetings, out_path, include_transcripts=(not bool(args.no_transcripts)))
         print(f"HTML report written to: {out_path}")
     else:
-        print_console(faces, emb_stats, meetings)
+        print_console(faces, emb_stats, meetings, show_text=bool(args.show_text))
 
     conn.close()
 

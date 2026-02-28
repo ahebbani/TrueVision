@@ -126,6 +126,34 @@ def open_db(path: Optional[str] = None) -> sqlite3.Connection:
     ensure_all_schemas(conn)
     return conn
 
+
+def get_latest_finished_meeting(conn: sqlite3.Connection, person_id: int):
+    """Return the most recent finished meeting row for a person.
+
+    Returns a tuple: (meeting_id, ended_at, transcript, summary) or None.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, ended_at, COALESCE(transcript,''), COALESCE(summary,'')
+        FROM meetings
+        WHERE person_id = ? AND ended_at IS NOT NULL
+        ORDER BY datetime(ended_at) DESC, id DESC
+        LIMIT 1
+        """,
+        (int(person_id),),
+    )
+    row = cur.fetchone()
+    return row
+
+
+def get_latest_finished_meeting_summary(conn: sqlite3.Connection, person_id: int) -> str:
+    row = get_latest_finished_meeting(conn, person_id)
+    if not row:
+        return ""
+    _mid, _ended_at, _transcript, summary = row
+    return summary or ""
+
 # Convenience: expose path
 __all__ = [
     "DB_PATH",
@@ -133,4 +161,6 @@ __all__ = [
     "ensure_all_schemas",
     "prune_embeddings_if_needed",
     "MAX_TEMPLATES_PER_PERSON",
+    "get_latest_finished_meeting",
+    "get_latest_finished_meeting_summary",
 ]

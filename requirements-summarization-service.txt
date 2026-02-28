@@ -1,0 +1,4 @@
+# Off-device summarization service (runs on a desktop/server with Ollama)
+fastapi
+uvicorn[standard]
+requests

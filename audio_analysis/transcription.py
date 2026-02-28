@@ -4,8 +4,15 @@ import time
 from datetime import datetime
 from typing import Optional
 
-import sounddevice as sd
-import soundfile as sf
+try:
+    import sounddevice as sd
+except Exception:  # pragma: no cover
+    sd = None  # type: ignore
+
+try:
+    import soundfile as sf
+except Exception:  # pragma: no cover
+    sf = None  # type: ignore
 
 # Transcription model is optional import to allow running without it
 try:
@@ -50,6 +57,11 @@ class Recorder:
         self.audio_path: Optional[str] = None
 
     def start(self, directory: str, filename_prefix: str = "meeting") -> str:
+        if sd is None or sf is None:
+            raise RuntimeError(
+                "Audio recording dependencies are missing. Install sounddevice and soundfile, "
+                "or use --no-audio / esp32-serial."
+            )
         os.makedirs(directory, exist_ok=True)
         ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         self.audio_path = os.path.join(directory, f"{filename_prefix}_{ts}.wav")
@@ -129,6 +141,29 @@ def summarize_text(text: str, max_sentences: int = 5) -> str:
     if not summary.endswith("."):
         summary += "."
     return summary
+
+
+def summarize_one_sentence(text: str, max_chars: int = 140) -> str:
+    """Return a single short sentence summary.
+
+    This is intentionally dependency-free and safe to run on-device.
+    If you later add an LLM summarizer, keep this as a fallback.
+    """
+    if not text:
+        return ""
+    s = summarize_text(text, max_sentences=1).replace("\n", " ").strip()
+    s = " ".join(s.split())
+    if not s:
+        return ""
+    if len(s) <= max_chars:
+        return s
+
+    # Clamp length without cutting in the middle of a word.
+    clipped = s[: max_chars + 1]
+    if " " in clipped:
+        clipped = clipped.rsplit(" ", 1)[0]
+    clipped = clipped.rstrip(" .")
+    return clipped + "…"
 
 
 def create_recorder(audio_source: str = "sounddevice", serial_port: str = "/dev/serial0", 
