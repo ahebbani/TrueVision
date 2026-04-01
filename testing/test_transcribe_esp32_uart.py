@@ -18,7 +18,9 @@ import os
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from audio_analysis.esp32_serial_audio import ESP32SerialAudioReceiver
 
 
