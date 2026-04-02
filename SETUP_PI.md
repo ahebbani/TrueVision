@@ -66,6 +66,81 @@ Note: `.venv` is a hidden directory (name starts with a dot). Use `ls -la` to se
 
 Important: On the Pi, don’t run `pip install -r requirements.txt` as-is; it will try to install `opencv-python`/`dlib` wheels and may conflict with the apt versions. Use the apt packages above and only pip-install extra project-specific libs if you add any later.
 
+## 2.5) Enable UART (/dev/serial0) for ESP32 audio
+
+If you’re using the ESP32 mic over UART, the Pi side reads from `/dev/serial0` (which typically points at `/dev/ttyS0` on a Pi 4).
+
+### A) Enable serial hardware and disable the serial login console
+
+Run:
+
+```bash
+sudo raspi-config
+```
+
+Then:
+- Interface Options → Serial Port
+- “Login shell over serial?” → **No**
+- “Enable serial hardware?” → **Yes**
+
+Reboot when prompted.
+
+### B) Fix permissions so you don’t need sudo
+
+1) Add your user to the serial groups and reboot (logout/login is not always enough):
+
+```bash
+sudo usermod -aG dialout,tty $USER
+sudo reboot
+```
+
+2) Verify `/dev/serial0` and the underlying device:
+
+```bash
+ls -l /dev/serial0
+readlink -f /dev/serial0
+ls -l /dev/ttyS0 /dev/ttyAMA0 2>/dev/null
+```
+
+Expected on a healthy setup is usually `crw-rw---- root dialout ... /dev/ttyS0`.
+
+If you see `crw------- root tty ... /dev/ttyS0`, the UART is still configured as a console or another rule is forcing root-only mode.
+
+3) Ensure `serial-getty` is not holding the port:
+
+```bash
+sudo systemctl disable --now serial-getty@ttyS0.service
+sudo systemctl disable --now serial-getty@ttyAMA0.service
+```
+
+4) If `/dev/ttyS0` is still root-only, add a udev rule to force dialout + mode 0660:
+
+```bash
+sudo tee /etc/udev/rules.d/99-zz-serial-permissions.rules >/dev/null <<'EOF'
+SUBSYSTEM=="tty", KERNEL=="ttyS0", GROUP="dialout", MODE="0660", OPTIONS+="last_rule"
+SUBSYSTEM=="tty", KERNEL=="ttyAMA0", GROUP="dialout", MODE="0660", OPTIONS+="last_rule"
+EOF
+
+sudo udevadm control --reload-rules
+sudo udevadm trigger --name-match=ttyS0
+sudo reboot
+```
+
+5) Quick verify (no sudo):
+
+```bash
+python3 -c "import serial; s=serial.Serial('/dev/serial0', 921600, timeout=1); print('opened'); s.close()"
+```
+
+If it still fails, check whether the kernel is using ttyS0 as an active console:
+
+```bash
+cat /sys/class/tty/console/active
+cat /proc/cmdline
+```
+
+If either mentions `ttyS0`/`serial0`, remove the `console=...` serial token (or re-run `raspi-config` as above) and reboot.
+
 ## 3) Get the dlib model files
 
 Place the model files in `facial_recognition/models/`:
@@ -158,6 +233,24 @@ Press `q` to quit.
 ## 7) Headless notes
 
 - `cv2.imshow` needs a display. If you're headless, either use VNC/desktop, or run with a virtual display (e.g., `xvfb-run -a python3 main.py`) or temporarily comment out the imshow/keypress lines.
+- If you are SSH'd into the Pi but want the window to appear on the Pi's attached monitor (desktop session), you must point your SSH session at the desktop display:
+
+```bash
+# In your SSH session
+export DISPLAY=:0
+export XAUTHORITY=/home/$USER/.Xauthority
+python3 main.py
+```
+
+If that still prints a display connection error, the Pi desktop may not be logged in (no running GUI session), or X authority may not allow your SSH session. In that case, use VNC, attach a keyboard temporarily, or run using X11 forwarding to your laptop.
+
+- To show the window on your laptop instead (X11 forwarding), install an X server on your laptop (e.g., XQuartz on macOS), then connect with trusted forwarding and run normally:
+
+```bash
+ssh -Y adity@raspberrypi.local
+cd ~/Files/TrueVision
+python3 main.py
+```
 - Performance: lower the camera resolution. In code we default to 640x480. You can change the `preferred_width/height` in `open_camera()` to 320x240 for a big CPU win.
 
 ## 8) Troubleshooting

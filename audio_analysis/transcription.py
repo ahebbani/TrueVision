@@ -14,6 +14,11 @@ try:
 except Exception:  # pragma: no cover
     sf = None  # type: ignore
 
+try:
+    import sounddevice as sd
+except Exception:  # pragma: no cover
+    sd = None  # type: ignore
+
 # Transcription model is optional import to allow running without it
 try:
     from faster_whisper import WhisperModel
@@ -53,7 +58,7 @@ class Recorder:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._file: Optional[sf.SoundFile] = None
-        self._stream: Optional[sd.InputStream] = None
+        self._stream: Optional[object] = None
         self.audio_path: Optional[str] = None
 
     def start(self, directory: str, filename_prefix: str = "meeting") -> str:
@@ -72,10 +77,12 @@ class Recorder:
                 # Non-fatal; dropouts will be in the stream
                 pass
             if self._stop.is_set():
+                assert sd is not None
                 raise sd.CallbackStop()
             if self._file is not None:
                 self._file.write(indata)
 
+        assert sd is not None
         self._stream = sd.InputStream(samplerate=self.sample_rate, channels=self.channels, callback=_callback)
         self._stream.start()
         return self.audio_path

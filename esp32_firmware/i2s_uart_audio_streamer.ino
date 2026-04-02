@@ -73,15 +73,17 @@ int32_t i2s_read_buffer[BUFFER_SIZE];
 int16_t audio_buffer[BUFFER_SIZE];
 uint8_t uart_packet[BUFFER_SIZE * 2 + 5];  // Sync(2) + Length(2) + Audio + Checksum(1)
 
+// Use UART0 pins (TX0=GPIO1, RX0=GPIO3) explicitly.
+// On some ESP32 variants (e.g., USB-native boards), `Serial` can map to USB CDC.
+static HardwareSerial &UART0 = Serial0;
+
 void setup() {
   // Initialize UART
-  Serial.begin(UART_BAUD_RATE);
-  while (!Serial) {
-    delay(10);
-  }
+  UART0.begin(UART_BAUD_RATE);
+  delay(50);
   
-  Serial.println("ESP32 I2S to UART Audio Streamer");
-  Serial.println("Initializing I2S...");
+  UART0.println("ESP32 I2S to UART Audio Streamer");
+  UART0.println("Initializing I2S...");
   
   // Configure I2S
   i2s_config_t i2s_config = {
@@ -109,7 +111,7 @@ void setup() {
   // Install and configure I2S driver
   esp_err_t err = i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
   if (err != ESP_OK) {
-    Serial.printf("Failed to install I2S driver: %d\n", err);
+    UART0.printf("Failed to install I2S driver: %d\n", err);
     while (1) {
       delay(1000);
     }
@@ -117,7 +119,7 @@ void setup() {
   
   err = i2s_set_pin(I2S_PORT, &pin_config);
   if (err != ESP_OK) {
-    Serial.printf("Failed to set I2S pins: %d\n", err);
+    UART0.printf("Failed to set I2S pins: %d\n", err);
     while (1) {
       delay(1000);
     }
@@ -127,8 +129,8 @@ void setup() {
   i2s_zero_dma_buffer(I2S_PORT);
   delay(100);
   
-  Serial.println("I2S initialized successfully");
-  Serial.println("Starting audio streaming to UART...");
+  UART0.println("I2S initialized successfully");
+  UART0.println("Starting audio streaming to UART...");
   delay(1000);
 }
 
@@ -176,7 +178,7 @@ void loop() {
   uart_packet[packet_idx++] = checksum;
   
   // Send packet over UART
-  Serial.write(uart_packet, packet_idx);
+  UART0.write(uart_packet, packet_idx);
   
   // Optional: Flash LED to show activity (if your board has one on GPIO 2)
   // digitalWrite(2, !digitalRead(2));

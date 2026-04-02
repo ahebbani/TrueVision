@@ -5,8 +5,8 @@ This is the end-to-end validation:
 ESP32 (I2S mic) -> UART packets -> Raspberry Pi -> WAV -> faster-whisper transcription.
 
 Usage:
-  python transcribe_esp32_uart.py --seconds 8
-  python transcribe_esp32_uart.py --port /dev/serial0 --baud 921600 --seconds 10 --model tiny
+    python testing/test_transcribe_esp32_uart.py --seconds 8
+    python testing/test_transcribe_esp32_uart.py --port /dev/serial0 --baud 921600 --seconds 10 --model tiny
 
 Notes:
 - Requires: pyserial, soundfile, numpy (already in requirements.txt)
@@ -18,6 +18,11 @@ import os
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from audio_analysis.esp32_serial_audio import ESP32SerialAudioReceiver
 
