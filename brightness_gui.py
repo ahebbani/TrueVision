@@ -1,15 +1,32 @@
 #!/usr/bin/env python3
 import math
+import os
+from pathlib import Path
+import re
+import shutil
 import subprocess
 import tkinter as tk
 from tkinter import ttk
+
+
+ALL_DISPLAYS_LABEL = "All displays"
+BACKLIGHT_SYSFS = Path("/sys/class/backlight")
 
 
 def _set_status(message: str) -> None:
     if "status_var" in globals():
         status_var.set(message)
 
-def get_connected_displays():
+
+def _command_exists(name: str) -> bool:
+    return shutil.which(name) is not None
+
+
+def _is_wayland_session() -> bool:
+    return os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland"
+
+
+def get_xrandr_displays():
     """Return (displays, primary) from xrandr.
 
     - displays: list of connected output names (e.g., ["DP-0", "HDMI-1"]) in xrandr order
@@ -36,6 +53,128 @@ def get_connected_displays():
             primary = name
 
     return displays, primary
+
+
+def get_backlight_displays() -> list[str]:
+    displays: list[str] = []
+    if not BACKLIGHT_SYSFS.is_dir():
+        return displays
+
+    for device in sorted(BACKLIGHT_SYSFS.iterdir()):
+        max_path = device / "max_brightness"
+        brightness_path = device / "brightness"
+        if not max_path.is_file() or not brightness_path.is_file():
+            continue
+
+        try:
+            max_value = int(max_path.read_text().strip())
+        except (OSError, ValueError):
+            continue
+
+        if max_value > 0:
+            displays.append(device.name)
+
+    return displays
+
+
+def get_backlight_level(device_name: str) -> float:
+    device_path = BACKLIGHT_SYSFS / device_name
+    try:
+        current = int((device_path / "brightness").read_text().strip())
+        maximum = int((device_path / "max_brightness").read_text().strip())
+    except (OSError, ValueError):
+        return 1.0
+
+    if maximum <= 0:
+        return 1.0
+    return clamp(current / maximum, 0.1, 1.0)
+
+
+def parse_ddcutil_displays() -> list[dict[str, str]]:
+    if not _command_exists("ddcutil"):
+        return []
+
+    proc = subprocess.run(
+        ["ddcutil", "detect", "--brief"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return []
+
+    displays: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+
+    for raw_line in proc.stdout.splitlines():
+        line = raw_line.strip()
+        match = re.match(r"^Display\s+(\d+)", line)
+        if match:
+            if current and "bus" in current:
+                displays.append(current)
+            current = {"label": f"Display {match.group(1)}"}
+            continue
+
+        if not current or not line:
+            continue
+
+        bus_match = re.search(r"/dev/i2c-(\d+)", line)
+        if bus_match:
+            current["bus"] = bus_match.group(1)
+            continue
+
+        if ":" not in line:
+            continue
+
+        key, value = [part.strip() for part in line.split(":", 1)]
+        if key in {"Monitor", "Model"} and value:
+            current["label"] = value
+        elif key == "DRM connector" and value:
+            current["connector"] = value
+
+    if current and "bus" in current:
+        displays.append(current)
+
+    labels_seen: set[str] = set()
+    for display in displays:
+        label = display["label"]
+        connector = display.get("connector")
+        if connector and label in labels_seen:
+            label = f"{label} ({connector})"
+        elif label in labels_seen:
+            label = f"{label} (bus {display['bus']})"
+        labels_seen.add(label)
+        display["label"] = label
+
+    return displays
+
+
+def detect_display_backend() -> tuple[str | None, list[str], str | None, str, dict[str, str]]:
+    backlight_displays = get_backlight_displays()
+    if backlight_displays:
+        primary = backlight_displays[0]
+        note = "Using Raspberry Pi backlight control"
+        return "backlight", backlight_displays, primary, note, {}
+
+    ddcutil_displays = parse_ddcutil_displays()
+    if ddcutil_displays:
+        labels = [display["label"] for display in ddcutil_displays]
+        bus_map = {display["label"]: display["bus"] for display in ddcutil_displays}
+        note = "Using DDC/CI monitor brightness control"
+        return "ddcutil", labels, labels[0], note, bus_map
+
+    xrandr_displays, primary = get_xrandr_displays()
+    if xrandr_displays:
+        note = "Using xrandr software brightness"
+        if _is_wayland_session():
+            note += " (may be ignored on Wayland)"
+        return "xrandr", xrandr_displays, primary, note, {}
+
+    if _is_wayland_session():
+        note = "No supported brightness backend found. On Pi Wayland, use /sys/class/backlight or install ddcutil for HDMI monitors."
+    else:
+        note = "No connected displays found via backlight, ddcutil, or xrandr"
+    return None, [], None, note, {}
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -97,6 +236,39 @@ def apply_xrandr_settings(output_name: str, brightness: float, r: float, g: floa
             _set_status("xrandr failed (no error output)")
 
 
+def apply_backlight_settings(device_name: str, brightness: float) -> None:
+    device_path = BACKLIGHT_SYSFS / device_name
+    try:
+        maximum = int((device_path / "max_brightness").read_text().strip())
+        target = max(1, int(round(clamp(brightness, 0.1, 1.0) * maximum)))
+        (device_path / "brightness").write_text(f"{target}\n")
+    except PermissionError:
+        _set_status(f"Backlight write failed for {device_name}: permission denied")
+    except (OSError, ValueError) as exc:
+        _set_status(f"Backlight write failed for {device_name}: {exc}")
+
+
+def apply_ddcutil_settings(display_label: str, brightness: float) -> None:
+    bus = ddcutil_bus_map.get(display_label)
+    if not bus:
+        _set_status(f"No DDC/CI bus found for {display_label}")
+        return
+
+    value = int(round(clamp(brightness, 0.1, 1.0) * 100.0))
+    proc = subprocess.run(
+        ["ddcutil", "setvcp", "10", str(value), "--bus", bus],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        if err:
+            _set_status(f"ddcutil failed: {err.splitlines()[-1]}")
+        else:
+            _set_status("ddcutil failed (no error output)")
+
+
 def get_selected_outputs() -> list[str]:
     selected = display_var.get() if "display_var" in globals() else ""
     if not connected_displays:
@@ -111,27 +283,54 @@ def get_selected_outputs() -> list[str]:
 def apply_settings(_event=None) -> None:
     outputs = get_selected_outputs()
     if not outputs:
-        _set_status("No connected displays found via xrandr")
+        _set_status(backend_note)
         return
 
     brightness = float(brightness_slider.get())
 
-    if night_shift_var.get():
+    if backend_kind == "xrandr" and night_shift_var.get():
         r, g, b = kelvin_to_rgb_gains(float(temp_slider.get()))
     else:
         r = g = b = 1.0
 
     for out in outputs:
-        apply_xrandr_settings(out, brightness, r, g, b)
+        if backend_kind == "backlight":
+            apply_backlight_settings(out, brightness)
+        elif backend_kind == "ddcutil":
+            apply_ddcutil_settings(out, brightness)
+        else:
+            apply_xrandr_settings(out, brightness, r, g, b)
 
-    if "status_var" in globals() and not status_var.get().startswith("xrandr failed"):
-        _set_status(f"Applied to: {', '.join(outputs)}")
+    if "status_var" not in globals():
+        return
+
+    status = status_var.get()
+    if status.startswith("xrandr failed") or status.startswith("ddcutil failed") or status.startswith("Backlight write failed"):
+        return
+
+    if backend_kind == "xrandr":
+        _set_status(f"Applied xrandr settings to: {', '.join(outputs)}")
+    elif backend_kind == "ddcutil":
+        _set_status(f"Applied DDC/CI brightness to: {', '.join(outputs)}")
+    else:
+        _set_status(f"Applied backlight brightness to: {', '.join(outputs)}")
 
 
 def on_night_shift_toggle() -> None:
     state = "normal" if night_shift_var.get() else "disabled"
     temp_slider.configure(state=state)
     apply_settings()
+
+
+def configure_controls_for_backend() -> None:
+    if backend_kind == "xrandr":
+        night_shift_toggle.configure(state="normal")
+        temp_slider.configure(state="normal" if night_shift_var.get() else "disabled")
+        return
+
+    night_shift_var.set(False)
+    night_shift_toggle.configure(state="disabled")
+    temp_slider.configure(state="disabled")
 
 # --- GUI setup ---
 root = tk.Tk()
@@ -140,9 +339,7 @@ root.geometry("420x280")
 
 tk.Label(root, text="Screen Brightness", font=("Arial", 12)).pack(pady=(8, 4))
 
-ALL_DISPLAYS_LABEL = "All displays"
-
-connected_displays, primary = get_connected_displays()
+backend_kind, connected_displays, primary, backend_note, ddcutil_bus_map = detect_display_backend()
 
 # Only show a dropdown if there is more than one connected output.
 display_var = tk.StringVar()
@@ -216,6 +413,13 @@ temp_slider.pack(pady=(0, 8))
 status_var = tk.StringVar(value="")
 status_label = tk.Label(root, textvariable=status_var, fg="#555", wraplength=390, justify="left")
 status_label.pack(padx=10, pady=(0, 8), anchor="w")
+
+configure_controls_for_backend()
+_set_status(backend_note)
+
+# Match the slider to the current backlight level when that backend is active.
+if backend_kind == "backlight" and connected_displays:
+    brightness_slider.set(get_backlight_level(connected_displays[0]))
 
 # Apply once on startup (safe no-op if xrandr isn't available)
 root.after(100, apply_settings)
