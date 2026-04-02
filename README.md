@@ -117,3 +117,28 @@ Choose the path that matches your environment. Run commands from the repo root s
 ## Database & audio linkage
 
 Audio recordings are stored per meeting in the `meetings` table (columns: `person_id`, `audio_path`, `transcript`, `summary`). Each meeting row links back to a person in `faces`. We avoid duplicating audio paths in `faces`; multiple meetings can exist per person. Shared schema + pruning logic lives in `data_access/db.py`. The SQLite file `faces.db` now resides directly in `data_access/`. Audio files saved under `data/recordings/`.
+
+## Copy audio files off the Pi (scp)
+
+Run these commands on your **Mac/PC terminal** (the destination machine), not inside an SSH session on the Pi.
+
+Copy a single file from the Pi repo root into your current local directory:
+
+```bash
+scp adity@raspberrypi.local:~/Files/TrueVision/esp32_test_audio_20260402_000557.wav .
+```
+
+Copy all ESP32 test WAVs into Downloads:
+
+```bash
+# macOS zsh note: quote/escape the '*' (or use `noglob`) so the wildcard expands on the Pi side.
+scp "adity@raspberrypi.local:~/Files/TrueVision/esp32_test_audio_*.wav" ~/Downloads/
+# Alternative:
+# noglob scp adity@raspberrypi.local:~/Files/TrueVision/esp32_test_audio_*.wav ~/Downloads/
+```
+
+If `raspberrypi.local` doesn’t resolve, replace it with the Pi’s IP address:
+
+```bash
+scp adity@192.168.x.y:~/Files/TrueVision/esp32_test_audio_*.wav ~/Downloads/
+```
