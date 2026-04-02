@@ -4,6 +4,11 @@ import subprocess
 import tkinter as tk
 from tkinter import ttk
 
+
+def _set_status(message: str) -> None:
+    if "status_var" in globals():
+        status_var.set(message)
+
 def get_connected_displays():
     """Return (displays, primary) from xrandr.
 
@@ -13,6 +18,7 @@ def get_connected_displays():
     try:
         output = subprocess.check_output(["xrandr", "-q"], text=True)
     except Exception:
+        _set_status("xrandr not available (or no X11 display)")
         return [], None
 
     displays: list[str] = []
@@ -68,7 +74,7 @@ def kelvin_to_rgb_gains(kelvin: float) -> tuple[float, float, float]:
 
 
 def apply_xrandr_settings(output_name: str, brightness: float, r: float, g: float, b: float) -> None:
-    subprocess.run(
+    proc = subprocess.run(
         [
             "xrandr",
             "--output",
@@ -79,10 +85,16 @@ def apply_xrandr_settings(output_name: str, brightness: float, r: float, g: floa
             f"{r:.3f}:{g:.3f}:{b:.3f}",
         ],
         check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        capture_output=True,
         text=True,
     )
+
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        if err:
+            _set_status(f"xrandr failed: {err.splitlines()[-1]}")
+        else:
+            _set_status("xrandr failed (no error output)")
 
 
 def get_selected_outputs() -> list[str]:
@@ -99,6 +111,7 @@ def get_selected_outputs() -> list[str]:
 def apply_settings(_event=None) -> None:
     outputs = get_selected_outputs()
     if not outputs:
+        _set_status("No connected displays found via xrandr")
         return
 
     brightness = float(brightness_slider.get())
@@ -111,6 +124,9 @@ def apply_settings(_event=None) -> None:
     for out in outputs:
         apply_xrandr_settings(out, brightness, r, g, b)
 
+    if "status_var" in globals() and not status_var.get().startswith("xrandr failed"):
+        _set_status(f"Applied to: {', '.join(outputs)}")
+
 
 def on_night_shift_toggle() -> None:
     state = "normal" if night_shift_var.get() else "disabled"
@@ -120,7 +136,7 @@ def on_night_shift_toggle() -> None:
 # --- GUI setup ---
 root = tk.Tk()
 root.title("Display Control")
-root.geometry("380x240")
+root.geometry("420x280")
 
 tk.Label(root, text="Screen Brightness", font=("Arial", 12)).pack(pady=(8, 4))
 
@@ -196,6 +212,10 @@ temp_slider = tk.Scale(
 temp_slider.set(4800)
 temp_slider.configure(state="disabled")
 temp_slider.pack(pady=(0, 8))
+
+status_var = tk.StringVar(value="")
+status_label = tk.Label(root, textvariable=status_var, fg="#555", wraplength=390, justify="left")
+status_label.pack(padx=10, pady=(0, 8), anchor="w")
 
 # Apply once on startup (safe no-op if xrandr isn't available)
 root.after(100, apply_settings)
