@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import argparse
 import platform
+import queue
 import time
 from datetime import datetime
 from typing import Optional
@@ -45,10 +46,12 @@ cursor = conn.cursor()
 
 # Optional OLED
 try:
-    from oled_output.oled_display import get_display
+    from oled_output.oled_display import get_display, _DummyDisplay
     _oled = get_display()
+    _oled_missing = isinstance(_oled, _DummyDisplay)
 except Exception:
     _oled = None
+    _oled_missing = True
 
 def parse_args():
     p = argparse.ArgumentParser(description="TrueVision runtime")
@@ -160,6 +163,54 @@ def recognize_face():
     else:
         print("INFO: Skipping audio subsystem initialization (disabled by flag).")
 
+    # ── ESP32 mode switch and marker integration ──────────────────────────────
+    # current_mode is a one-element list so the closures below can mutate it.
+    from audio_analysis.esp32_serial_audio import MODE_AUDIO, MODE_FACE
+    current_mode = [MODE_AUDIO]
+    # Thread-safe queue for marker events (PKT_MARKER from ESP32 button).
+    # The main loop drains the queue and appends [MARKER HH:MM:SS] to the
+    # active meeting transcript.
+    _marker_queue: queue.Queue = queue.Queue()
+
+    def _on_mode_change(mode_byte: int) -> None:
+        current_mode[0] = mode_byte
+        label = "FACE" if mode_byte == MODE_FACE else "AUDIO"
+        print(f"ESP32: Mode changed to {label}")
+
+    def _on_marker() -> None:
+        _marker_queue.put(datetime.now().strftime("%H:%M:%S"))
+
+    def _on_diag_request() -> None:
+        # Diagnostic handler: if OLED is absent the send_pi_status call inside
+        # _receiver_loop already pushes current status.  Log here for visibility.
+        print("ESP32: DIAG_REQUEST received; status pushed to ESP32.")
+
+    # Wire up callbacks on the shared receiver if using esp32-serial audio.
+    # For 'auto', do a quick probe so we set callbacks before the main loop.
+    _esp32_receiver = None
+    if args.audio_source in ('esp32-serial', 'auto'):
+        try:
+            from audio_analysis.transcription import get_shared_receiver
+            from audio_analysis.esp32_serial_audio import probe_esp32_uart_stream
+            should_init = (
+                args.audio_source == 'esp32-serial'
+                or (probe_esp32_uart_stream is not None and
+                    probe_esp32_uart_stream(port=args.serial_port,
+                                            baud_rate=args.serial_baud,
+                                            timeout_sec=1.0))
+            )
+            if should_init:
+                _esp32_receiver = get_shared_receiver(
+                    serial_port=args.serial_port,
+                    serial_baud=args.serial_baud,
+                    oled_missing=_oled_missing,
+                    on_mode_change=_on_mode_change,
+                    on_marker=_on_marker,
+                    on_diag_request=_on_diag_request,
+                )
+        except Exception as _recv_err:
+            print(f"WARNING: Could not initialise ESP32 receiver for callbacks: {_recv_err}")
+
     transcriber: Optional[object] = None
     if transcription_enabled and Transcriber is not None:
         try:
@@ -222,8 +273,33 @@ def recognize_face():
 
         display_frame = np.zeros_like(frame) if args.overlay_only else frame.copy()
 
+        # ── Drain ESP32 marker events ─────────────────────────────────────────
+        # The button short-press sends PKT_MARKER; we insert a timestamp tag
+        # into the transcript of every active meeting.
+        while not _marker_queue.empty():
+            try:
+                marker_ts = _marker_queue.get_nowait()
+                marker_tag = f" [MARKER {marker_ts}]"
+                for pid, mid in list(active_meetings.items()):
+                    try:
+                        cursor.execute(
+                            "UPDATE meetings SET transcript = COALESCE(transcript,'') || ? WHERE id = ?",
+                            (marker_tag, mid),
+                        )
+                        conn.commit()
+                        print(f"Marker inserted into meeting {mid} at {marker_ts}")
+                    except Exception as _me:
+                        print(f"WARNING: Could not insert marker into meeting {mid}: {_me}")
+            except queue.Empty:
+                break
+
         recognized_ids_in_frame = set()
-        faces_info = recog.detect_and_recognize(conn, frame)
+        # In AUDIO-only mode skip the heavy face-detection computation entirely.
+        faces_info = (
+            recog.detect_and_recognize(conn, frame)
+            if current_mode[0] != MODE_AUDIO
+            else []
+        )
         if not hasattr(recognize_face, "_prev_summaries"):
             recognize_face._prev_summaries = {}
         prev_summaries = recognize_face._prev_summaries  # type: ignore[attr-defined]
@@ -286,7 +362,7 @@ def recognize_face():
                         transcription_enabled,
                         prev_summary=prev_summary,
                     )
-                    if transcription_enabled and recognized_id not in active_recorders:
+                    if transcription_enabled and recognized_id not in active_recorders and current_mode[0] != MODE_FACE:
                         if create_recorder:
                             rec = create_recorder(
                                 audio_source=args.audio_source,

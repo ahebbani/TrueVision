@@ -232,3 +232,43 @@ def create_recorder(audio_source: str = "sounddevice", serial_port: str = "/dev/
     
     else:  # Default to sounddevice
         return Recorder(sample_rate=sample_rate, channels=channels)
+
+
+def get_shared_receiver(
+    serial_port: str = '/dev/serial0',
+    serial_baud: int = 921600,
+    **kwargs,
+) -> 'ESP32SerialAudioReceiver':
+    """Return the cached ESP32SerialAudioReceiver for the given port/baud,
+    creating and starting one (with any extra kwargs) if it does not yet exist.
+
+    Extra kwargs are forwarded to ESP32SerialAudioReceiver.__init__ only when
+    creating a new instance — they are silently ignored if the receiver is
+    already running.  Pass oled_missing, on_mode_change, on_marker, and
+    on_diag_request here when initialising callbacks from main.py.
+    """
+    if ESP32SerialAudioReceiver is None:
+        raise RuntimeError("ESP32 serial audio not available. Install pyserial.")
+
+    key = (serial_port, int(serial_baud))
+    with _shared_serial_receivers_lock:
+        receiver = _shared_serial_receivers.get(key)
+        if receiver is None:
+            receiver = ESP32SerialAudioReceiver(
+                port=serial_port,
+                baud_rate=serial_baud,
+                buffer_seconds=60.0,
+                **kwargs,
+            )
+            receiver.start()
+            _shared_serial_receivers[key] = receiver
+        else:
+            # Apply callbacks if the caller provided them and they are not yet set
+            for attr in ('on_mode_change', 'on_marker', 'on_diag_request'):
+                if attr in kwargs and getattr(receiver, attr, None) is None:
+                    setattr(receiver, attr, kwargs[attr])
+            if 'oled_missing' in kwargs:
+                receiver.oled_missing = kwargs['oled_missing']
+            if not receiver.is_receiving():
+                receiver.start()
+    return receiver

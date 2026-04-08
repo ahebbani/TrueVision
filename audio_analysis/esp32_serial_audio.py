@@ -1,30 +1,45 @@
 """ESP32 Serial Audio Receiver for Raspberry Pi.
 
 Receives audio data from ESP32 via UART/Serial connection.
-The ESP32 sends raw 16-bit PCM audio at 16kHz mono.
+The ESP32 sends raw 16-bit PCM audio at 16 kHz mono.
 
-Protocol:
-    Simple framing: [SYNC(2 bytes)] [LENGTH(2 bytes)] [AUDIO_DATA] [CHECKSUM(1 byte)]
-    - SYNC: 0xAA 0x55
-    - LENGTH: Number of audio bytes (little-endian uint16)
-    - AUDIO_DATA: Raw 16-bit PCM samples
-    - CHECKSUM: Simple sum of all audio bytes & 0xFF
+Extended bidirectional protocol (truevision_main.ino):
+    Frame: [SYNC(2)] [TYPE(1)] [LENGTH(2 LE)] [DATA(LENGTH)] [CHECKSUM(1)]
+    - SYNC:     0xAA 0x55
+    - TYPE:     packet type (see PKT_* constants below)
+    - LENGTH:   number of data bytes, little-endian uint16
+    - DATA:     payload bytes
+    - CHECKSUM: sum(data bytes) & 0xFF
+
+    ESP32 → Pi types:
+        0x01  AUDIO_DATA   raw int16 PCM
+        0x02  MODE_CHANGE  1-byte: 0x00=AUDIO, 0x01=FACE
+        0x03  MARKER       0 bytes (Pi timestamps on receipt)
+        0x04  DIAG_REQUEST 0 bytes
+
+    Pi → ESP32 types:
+        0x10  HEARTBEAT    1-byte: 0x00
+        0x11  PI_STATUS    1+ bytes: error_code + optional ASCII
+        0x12  ACK          1-byte: echoed TYPE
 
 Usage:
-    receiver = ESP32SerialAudioReceiver(port='/dev/serial0', baud_rate=921600)
+    receiver = ESP32SerialAudioReceiver(
+        port='/dev/serial0',
+        baud_rate=921600,
+        oled_missing=False,          # set True when Pi OLED is absent
+        on_mode_change=my_callback,  # called with (mode_byte,)
+        on_marker=my_callback,       # called with no args
+        on_diag_request=my_callback, # called with no args
+    )
     receiver.start()
-    
-    # Later, get audio for transcription
     audio_bytes = receiver.get_last_n_seconds(5.0)
-    # Write to WAV file and transcribe...
-    
     receiver.stop()
 """
 import os
 import struct
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import soundfile as sf
@@ -33,6 +48,28 @@ try:
     import serial
 except ImportError:
     serial = None  # type: ignore
+
+# ── Packet type constants (must match truevision_main.ino) ───────────────────
+# ESP32 → Pi
+PKT_AUDIO        = 0x01
+PKT_MODE_CHANGE  = 0x02
+PKT_MARKER       = 0x03
+PKT_DIAG_REQUEST = 0x04
+# Pi → ESP32
+PKT_HEARTBEAT    = 0x10
+PKT_PI_STATUS    = 0x11
+PKT_ACK          = 0x12
+
+# PI_STATUS error codes sent in PKT_PI_STATUS payload
+PI_STATUS_OK               = 0x00
+PI_STATUS_CAMERA_FAIL      = 0x01
+PI_STATUS_MODEL_LOAD_FAIL  = 0x02
+PI_STATUS_DB_ERROR         = 0x03
+PI_STATUS_SUMMARIZER_TIMEOUT = 0x04
+
+# Operating modes (MODE_CHANGE payload values)
+MODE_AUDIO = 0x00
+MODE_FACE  = 0x01
 
 
 def probe_esp32_uart_stream(port: str = '/dev/serial0', baud_rate: int = 921600, timeout_sec: float = 1.0) -> bool:
@@ -80,21 +117,36 @@ def probe_esp32_uart_stream(port: str = '/dev/serial0', baud_rate: int = 921600,
 
 class ESP32SerialAudioReceiver:
     """Receives and buffers audio from ESP32 via serial connection."""
-    
-    SYNC_BYTE_1 = 0xAA
-    SYNC_BYTE_2 = 0x55
-    SAMPLE_RATE = 16000  # Hz
-    CHANNELS = 1  # Mono
-    BYTES_PER_SAMPLE = 2  # 16-bit
-    
-    def __init__(self, port: str = '/dev/serial0', baud_rate: int = 921600, 
-                 buffer_seconds: float = 60.0):
+
+    SYNC_BYTE_1      = 0xAA
+    SYNC_BYTE_2      = 0x55
+    SAMPLE_RATE      = 16000  # Hz
+    CHANNELS         = 1      # Mono
+    BYTES_PER_SAMPLE = 2      # 16-bit
+
+    def __init__(
+        self,
+        port: str = '/dev/serial0',
+        baud_rate: int = 921600,
+        buffer_seconds: float = 60.0,
+        oled_missing: bool = False,
+        on_mode_change: Optional[Callable[[int], None]] = None,
+        on_marker: Optional[Callable[[], None]] = None,
+        on_diag_request: Optional[Callable[[], None]] = None,
+    ):
         """Initialize serial audio receiver.
-        
+
         Args:
-            port: Serial port device path (e.g., '/dev/serial0' or '/dev/ttyAMA0')
+            port: Serial port device path (e.g., '/dev/serial0')
             baud_rate: UART baud rate (921600 recommended for Pi)
-            buffer_seconds: Maximum seconds of audio to keep in buffer
+            buffer_seconds: Maximum seconds of audio to keep in ring buffer
+            oled_missing: When True, the receiver will push PI_STATUS packets
+                to the ESP32 whenever a non-OK status is set via send_pi_status().
+                If False, PI_STATUS is only sent in response to DIAG_REQUEST.
+            on_mode_change: Called with the new mode byte (MODE_AUDIO / MODE_FACE)
+                when the ESP32 sends a PKT_MODE_CHANGE packet.
+            on_marker: Called (no args) when the ESP32 sends PKT_MARKER.
+            on_diag_request: Called (no args) when the ESP32 sends PKT_DIAG_REQUEST.
         """
         if serial is None:
             raise RuntimeError("pyserial is not installed. Install with: pip install pyserial")
@@ -103,14 +155,24 @@ class ESP32SerialAudioReceiver:
         self.baud_rate = baud_rate
         self.buffer_seconds = buffer_seconds
         self.max_buffer_bytes = int(buffer_seconds * self.SAMPLE_RATE * self.BYTES_PER_SAMPLE)
-        
+
+        # Callbacks (called from the receiver daemon thread)
+        self.on_mode_change: Optional[Callable[[int], None]] = on_mode_change
+        self.on_marker: Optional[Callable[[], None]] = on_marker
+        self.on_diag_request: Optional[Callable[[], None]] = on_diag_request
+
+        # When True, send PI_STATUS proactively (OLED absent — no other display)
+        self.oled_missing: bool = oled_missing
+
         self._serial: Optional[serial.Serial] = None
         self._buffer = bytearray()
         self._buffer_lock = threading.Lock()
+        self._write_lock = threading.Lock()   # serialise UART writes
         self._thread: Optional[threading.Thread] = None
+        self._hb_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._running = False
-        
+
         # Statistics
         self.packets_received = 0
         self.packets_corrupted = 0
@@ -136,8 +198,10 @@ class ESP32SerialAudioReceiver:
         
         self._stop_event.clear()
         self._running = True
-        self._thread = threading.Thread(target=self._receiver_loop, daemon=True)
+        self._thread = threading.Thread(target=self._receiver_loop, daemon=True, name='esp32-rx')
         self._thread.start()
+        self._hb_thread = threading.Thread(target=self._heartbeat_loop, daemon=True, name='esp32-hb')
+        self._hb_thread.start()
     
     def stop(self) -> None:
         """Stop receiving and close serial port."""
@@ -150,6 +214,9 @@ class ESP32SerialAudioReceiver:
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
+        if self._hb_thread is not None:
+            self._hb_thread.join(timeout=2.0)
+            self._hb_thread = None
         
         if self._serial is not None:
             try:
@@ -161,60 +228,146 @@ class ESP32SerialAudioReceiver:
         print(f"ESP32 Serial Audio: Stopped. Stats - Packets: {self.packets_received}, "
               f"Corrupted: {self.packets_corrupted}, Bytes: {self.bytes_received}")
     
+    # ── Internal packet builder / sender ────────────────────────────────────
+
+    def _build_packet(self, pkt_type: int, data: bytes) -> bytes:
+        """Build a framed packet with the extended bidirectional format."""
+        data_len = len(data)
+        header = bytes([
+            self.SYNC_BYTE_1,
+            self.SYNC_BYTE_2,
+            pkt_type,
+            data_len & 0xFF,
+            (data_len >> 8) & 0xFF,
+        ])
+        checksum = sum(data) & 0xFF
+        return header + data + bytes([checksum])
+
+    def _send_raw(self, packet: bytes) -> None:
+        """Thread-safe write to the serial port."""
+        if self._serial is None or not self._running:
+            return
+        with self._write_lock:
+            try:
+                self._serial.write(packet)
+            except Exception as e:
+                print(f"ESP32 Serial Audio: TX error: {e}")
+
+    def _send_ack(self, acked_type: int) -> None:
+        self._send_raw(self._build_packet(PKT_ACK, bytes([acked_type])))
+
+    # ── Heartbeat sender ─────────────────────────────────────────────────────
+
+    def _heartbeat_loop(self) -> None:
+        """Send PKT_HEARTBEAT to the ESP32 every 3 seconds."""
+        hb_packet = self._build_packet(PKT_HEARTBEAT, bytes([0x00]))
+        while not self._stop_event.is_set():
+            self._send_raw(hb_packet)
+            self._stop_event.wait(timeout=3.0)
+
+    # ── Public method: push Pi status to ESP32 ────────────────────────────────
+
+    def send_pi_status(self, error_code: int, message: str = '', force: bool = False) -> None:
+        """Send a PKT_PI_STATUS packet to the ESP32.
+
+        Args:
+            error_code: One of the PI_STATUS_* constants from this module.
+            message:    Optional ASCII description (truncated to 64 characters).
+            force:      If True, send even when oled_missing is False.  The
+                        receiver always sends in response to DIAG_REQUEST
+                        regardless of this flag; call this directly for
+                        proactive status push.
+        """
+        if not self.oled_missing and not force:
+            return
+        msg_bytes = message[:64].encode('ascii', errors='replace')
+        payload = bytes([error_code]) + msg_bytes
+        self._send_raw(self._build_packet(PKT_PI_STATUS, payload))
+
+    # ── Receiver loop ─────────────────────────────────────────────────────────
+
     def _receiver_loop(self) -> None:
         """Background thread that continuously reads from serial port."""
         print("ESP32 Serial Audio: Receiver thread started")
-        
+
         while not self._stop_event.is_set() and self._serial is not None:
             try:
-                # Look for sync bytes
+                # Locate the sync pair 0xAA 0x55
                 if not self._find_sync():
                     continue
-                
+
+                # Read TYPE byte (1 byte)
+                type_byte = self._serial.read(1)
+                if len(type_byte) != 1:
+                    continue
+                pkt_type = type_byte[0]
+
                 # Read packet length (2 bytes, little-endian)
                 length_bytes = self._serial.read(2)
                 if len(length_bytes) != 2:
                     continue
-                
                 length = struct.unpack('<H', length_bytes)[0]
-                
-                # Sanity check on length (max ~4KB per packet)
-                if length == 0 or length > 4096:
-                    continue
-                
-                # Read audio data
-                audio_data = self._serial.read(length)
-                if len(audio_data) != length:
-                    continue
-                
-                # Read checksum
-                checksum_bytes = self._serial.read(1)
-                if len(checksum_bytes) != 1:
-                    continue
-                
-                expected_checksum = checksum_bytes[0]
-                actual_checksum = sum(audio_data) & 0xFF
-                
-                if expected_checksum != actual_checksum:
+
+                # Sanity check on length
+                if length > 4096:
                     self.packets_corrupted += 1
                     continue
-                
-                # Valid packet - add to buffer
-                with self._buffer_lock:
-                    self._buffer.extend(audio_data)
-                    # Trim buffer if too large
-                    if len(self._buffer) > self.max_buffer_bytes:
-                        trim_amount = len(self._buffer) - self.max_buffer_bytes
-                        self._buffer = self._buffer[trim_amount:]
-                
-                self.packets_received += 1
-                self.bytes_received += length
-                
+
+                # Read payload
+                data = self._serial.read(length) if length > 0 else b''
+                if len(data) != length:
+                    continue
+
+                # Read and verify checksum
+                cs_byte = self._serial.read(1)
+                if len(cs_byte) != 1:
+                    continue
+                if (sum(data) & 0xFF) != cs_byte[0]:
+                    self.packets_corrupted += 1
+                    continue
+
+                # Dispatch by type
+                if pkt_type == PKT_AUDIO:
+                    # Audio data — append to ring buffer
+                    with self._buffer_lock:
+                        self._buffer.extend(data)
+                        if len(self._buffer) > self.max_buffer_bytes:
+                            trim = len(self._buffer) - self.max_buffer_bytes
+                            self._buffer = self._buffer[trim:]
+                    self.packets_received += 1
+                    self.bytes_received += length
+
+                elif pkt_type == PKT_MODE_CHANGE:
+                    if length >= 1 and self.on_mode_change is not None:
+                        try:
+                            self.on_mode_change(data[0])
+                        except Exception as cb_err:
+                            print(f"ESP32 Serial Audio: on_mode_change error: {cb_err}")
+
+                elif pkt_type == PKT_MARKER:
+                    if self.on_marker is not None:
+                        try:
+                            self.on_marker()
+                        except Exception as cb_err:
+                            print(f"ESP32 Serial Audio: on_marker error: {cb_err}")
+
+                elif pkt_type == PKT_DIAG_REQUEST:
+                    # Always respond with current status + ACK regardless of oled_missing
+                    self.send_pi_status(PI_STATUS_OK, force=True)
+                    self._send_ack(PKT_DIAG_REQUEST)
+                    if self.on_diag_request is not None:
+                        try:
+                            self.on_diag_request()
+                        except Exception as cb_err:
+                            print(f"ESP32 Serial Audio: on_diag_request error: {cb_err}")
+
+                # Unknown types are silently ignored (forward-compatible)
+
             except Exception as e:
                 if not self._stop_event.is_set():
                     print(f"ESP32 Serial Audio: Error in receiver loop: {e}")
                 time.sleep(0.1)
-        
+
         print("ESP32 Serial Audio: Receiver thread stopped")
     
     def _find_sync(self) -> bool:
