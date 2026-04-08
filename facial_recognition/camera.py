@@ -128,4 +128,11 @@ def open_camera(backend: str = 'auto', index: int = 0, preferred_width: int = 64
     elif backend == 'picamera2':
         return try_sequence(['picamera2'])
     else:
+        # On Linux (Raspberry Pi), prefer GStreamer and Picamera2 over the raw
+        # V4L2 OpenCV path. The V4L2/libcamera compat layer on Pi 5 + Trixie
+        # can deliver frames in the wrong colour format (RGB instead of BGR),
+        # causing a blue tint and dlib detection failures. The GStreamer and
+        # Picamera2 paths both explicitly convert to BGR and are reliable.
+        if platform.system() == 'Linux':
+            return try_sequence(['gstreamer', 'picamera2', 'opencv'])
         return try_sequence(['opencv', 'gstreamer', 'picamera2'])

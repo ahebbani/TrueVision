@@ -157,6 +157,11 @@ def open_camera(preferred_width: int = 640, preferred_height: int = 480, preferr
     elif backend == 'picamera2':
         return try_sequence(['picamera2'])
     else:
+        # On Linux (Raspberry Pi), prefer GStreamer and Picamera2 over raw V4L2.
+        # See camera.py for the full explanation.
+        import platform as _platform
+        if _platform.system() == 'Linux':
+            return try_sequence(['gstreamer', 'picamera2', 'opencv'])
         return try_sequence(['opencv', 'gstreamer', 'picamera2'])
 
 
