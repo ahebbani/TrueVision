@@ -2,3 +2,21 @@
 *.db
 *.dat
 *.html
+
+# Model files (large binaries — download via make models or setup_pi.sh)
+*.bz2
+facial_recognition/models/*.dat
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+.venv/
+.conda/
+*.conda/
+
+# IDE / OS
+.DS_Store
+*.swp

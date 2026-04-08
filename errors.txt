@@ -1,0 +1,118 @@
+(.venv) zohai@raspberrypi:~/Desktop/Files/TrueVision $ ./setup_pi.sh 
+[INFO]  Repository root: /home/zohai/Desktop/Files/TrueVision
+[INFO]  === Step 1/7: Updating system packages ===
+Hit:1 http://deb.debian.org/debian trixie InRelease
+Hit:2 http://deb.debian.org/debian trixie-updates InRelease
+Hit:3 http://deb.debian.org/debian-security trixie-security InRelease            
+Hit:4 http://archive.raspberrypi.com/debian trixie InRelease                     
+Reading package lists... Done                              
+Reading package lists... Done
+Building dependency tree... Done
+Reading state information... Done
+Calculating upgrade... Done
+The following packages were automatically installed and are no longer required:
+  alacarte gir1.2-gmenu-3.0 gnome-menus gtk-nop libgnome-menu-3-0 linux-headers-6.12.47+rpt-common-rpi linux-headers-6.12.47+rpt-rpi-2712
+  linux-headers-6.12.47+rpt-rpi-v8 linux-image-6.12.47+rpt-rpi-2712 linux-image-6.12.47+rpt-rpi-v8 linux-kbuild-6.12.47+rpt python3-gi-cairo retry
+Use 'sudo apt autoremove' to remove them.
+The following NEW packages will be installed:
+  socat
+The following packages will be upgraded:
+  code libtiff-dev libtiff6 libtiffxx6
+4 upgraded, 1 newly installed, 0 to remove and 0 not upgraded.
+Need to get 123 MB of archives.
+After this operation, 4,755 kB of additional disk space will be used.
+Get:1 http://deb.debian.org/debian-security trixie-security/main arm64 libtiff-dev arm64 4.7.0-3+deb13u2 [471 kB]
+Get:2 http://deb.debian.org/debian-security trixie-security/main arm64 libtiff6 arm64 4.7.0-3+deb13u2 [325 kB]
+Get:3 http://deb.debian.org/debian-security trixie-security/main arm64 libtiffxx6 arm64 4.7.0-3+deb13u2 [164 kB]
+Get:4 http://deb.debian.org/debian trixie/main arm64 socat arm64 1.8.0.3-1 [411 kB]
+Get:5 http://archive.raspberrypi.com/debian trixie/main arm64 code arm64 1.115.0-1775600335 [122 MB]
+Fetched 123 MB in 30s (4,055 kB/s)                                                                                                                       
+apt-listchanges: Reading changelogs...
+Preconfiguring packages ...
+(Reading database ... 200478 files and directories currently installed.)
+Preparing to unpack .../code_1.115.0-1775600335_arm64.deb ...
+Unpacking code (1.115.0-1775600335) over (1.114.0-1775036299) ...
+Preparing to unpack .../libtiff-dev_4.7.0-3+deb13u2_arm64.deb ...
+Unpacking libtiff-dev:arm64 (4.7.0-3+deb13u2) over (4.7.0-3+deb13u1) ...
+Preparing to unpack .../libtiff6_4.7.0-3+deb13u2_arm64.deb ...
+Unpacking libtiff6:arm64 (4.7.0-3+deb13u2) over (4.7.0-3+deb13u1) ...
+Preparing to unpack .../libtiffxx6_4.7.0-3+deb13u2_arm64.deb ...
+Unpacking libtiffxx6:arm64 (4.7.0-3+deb13u2) over (4.7.0-3+deb13u1) ...
+Selecting previously unselected package socat.
+Preparing to unpack .../socat_1.8.0.3-1_arm64.deb ...
+Unpacking socat (1.8.0.3-1) ...
+Setting up code (1.115.0-1775600335) ...
+Setting up socat (1.8.0.3-1) ...
+Setting up libtiff6:arm64 (4.7.0-3+deb13u2) ...
+Setting up libtiffxx6:arm64 (4.7.0-3+deb13u2) ...
+Setting up libtiff-dev:arm64 (4.7.0-3+deb13u2) ...
+Processing triggers for mailcap (3.74) ...
+Processing triggers for desktop-file-utils (0.28-1) ...
+Processing triggers for gnome-menus (3.36.0-3) ...
+Processing triggers for libc-bin (2.41-12+rpt1+deb13u2) ...
+Processing triggers for man-db (2.13.1-1) ...
+Processing triggers for shared-mime-info (2.4-5+b2) ...
+[OK]    System packages updated.
+[INFO]  === Step 2/7: Installing apt dependencies ===
+Reading package lists... Done
+Building dependency tree... Done
+Reading state information... Done
+python3 is already the newest version (3.13.5-1).
+python3-pip is already the newest version (25.1.1+dfsg-1+rpt1).
+python3-venv is already the newest version (3.13.5-1).
+make is already the newest version (4.4.1-2).
+make set to manually installed.
+bzip2 is already the newest version (1.0.8-6).
+bzip2 set to manually installed.
+wget is already the newest version (1.25.0-2).
+wget set to manually installed.
+git is already the newest version (1:2.47.3-0+deb13u1).
+git set to manually installed.
+The following packages were automatically installed and are no longer required:
+  alacarte gir1.2-gmenu-3.0 gnome-menus gtk-nop libgnome-menu-3-0 linux-headers-6.12.47+rpt-common-rpi linux-headers-6.12.47+rpt-rpi-2712
+  linux-headers-6.12.47+rpt-rpi-v8 linux-image-6.12.47+rpt-rpi-2712 linux-image-6.12.47+rpt-rpi-v8 linux-kbuild-6.12.47+rpt python3-gi-cairo retry
+Use 'sudo apt autoremove' to remove them.
+0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.
+Reading package lists... Done
+Building dependency tree... Done
+Reading state information... Done
+E: Unable to locate package python3-dlib
+[WARN]  One or more camera/vision apt packages failed — see output above.
+Reading package lists... Done
+Building dependency tree... Done
+Reading state information... Done
+libcamera-apps is already the newest version (1.11.1-1).
+gstreamer1.0-tools is already the newest version (1.26.2-2).
+gstreamer1.0-plugins-base is already the newest version (1.26.2-1+rpt3+deb13u1).
+gstreamer1.0-plugins-good is already the newest version (1.26.2-1).
+The following packages were automatically installed and are no longer required:
+  alacarte gir1.2-gmenu-3.0 gnome-menus gtk-nop libgnome-menu-3-0 linux-headers-6.12.47+rpt-common-rpi linux-headers-6.12.47+rpt-rpi-2712
+  linux-headers-6.12.47+rpt-rpi-v8 linux-image-6.12.47+rpt-rpi-2712 linux-image-6.12.47+rpt-rpi-v8 linux-kbuild-6.12.47+rpt python3-gi-cairo retry
+Use 'sudo apt autoremove' to remove them.
+0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.
+Reading package lists... Done
+Building dependency tree... Done
+Reading state information... Done
+rpicam-apps is already the newest version (1.11.1-1).
+The following packages were automatically installed and are no longer required:
+  alacarte gir1.2-gmenu-3.0 gnome-menus gtk-nop libgnome-menu-3-0 linux-headers-6.12.47+rpt-common-rpi linux-headers-6.12.47+rpt-rpi-2712
+  linux-headers-6.12.47+rpt-rpi-v8 linux-image-6.12.47+rpt-rpi-2712 linux-image-6.12.47+rpt-rpi-v8 linux-kbuild-6.12.47+rpt python3-gi-cairo retry
+Use 'sudo apt autoremove' to remove them.
+0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.
+Reading package lists... Done
+Building dependency tree... Done
+Reading state information... Done
+gstreamer1.0-libcamera is already the newest version (0.7.0+rpt20260205-1).
+The following packages were automatically installed and are no longer required:
+  alacarte gir1.2-gmenu-3.0 gnome-menus gtk-nop libgnome-menu-3-0 linux-headers-6.12.47+rpt-common-rpi linux-headers-6.12.47+rpt-rpi-2712
+  linux-headers-6.12.47+rpt-rpi-v8 linux-image-6.12.47+rpt-rpi-2712 linux-image-6.12.47+rpt-rpi-v8 linux-kbuild-6.12.47+rpt python3-gi-cairo retry
+Use 'sudo apt autoremove' to remove them.
+0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.
+Reading package lists... Done
+Building dependency tree... Done
+Reading state information... Done
+Package libatlas-base-dev is not available, but is referred to by another package.
+This may mean that the package is missing, has been obsoleted, or
+is only available from another source
+
+E: Package 'libatlas-base-dev' has no installation candidate

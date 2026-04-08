@@ -50,7 +50,8 @@ sudo apt install -y \
 Notes:
 - `python3-opencv` from apt is built with GStreamer, which lets OpenCV use the `libcamerasrc` pipeline.
 - `python3-dlib` saves you from compiling `dlib` on the Pi.
-- `python3-picamera2` gives a reliable fallback.
+- `python3-picamera2` gives a reliable fallback.  gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+
 - `gstreamer1.0-libcamera` may already be present or have a slightly different package name depending on your image; it's optional.
 
 You can work with the system Python directly. If you prefer a virtual environment, create one that can see system packages so OpenCV/dlib remain available:

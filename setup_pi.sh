@@ -47,13 +47,23 @@ sudo apt-get install -y \
     git
 
 # OpenCV with GStreamer (from apt — avoids heavy pip build, keeps GStreamer support)
-# python3-dlib avoids compiling dlib from source on the Pi (hours of build time)
 # python3-picamera2 provides the Picamera2 fallback
+# NOTE: python3-dlib was removed from Debian Trixie repos; we build it via pip below.
 sudo apt-get install -y \
     python3-opencv \
-    python3-dlib \
     python3-picamera2 \
     || warn "One or more camera/vision apt packages failed — see output above."
+
+# dlib build dependencies (required since python3-dlib is absent from Trixie)
+# This lets 'pip install dlib' compile from source (~10-20 min on Pi 5)
+sudo apt-get install -y \
+    cmake \
+    build-essential \
+    python3-dev \
+    libboost-dev \
+    libboost-python-dev \
+    libboost-thread-dev \
+    libx11-dev
 
 # Camera and GStreamer stack
 sudo apt-get install -y \
@@ -70,10 +80,12 @@ sudo apt-get install -y rpicam-apps 2>/dev/null || true
 sudo apt-get install -y gstreamer1.0-libcamera 2>/dev/null || true
 
 # Math / BLAS libs required by numpy / scipy
+# Note: libatlas-base-dev was removed from Debian Trixie; libopenblas-dev replaces it.
 sudo apt-get install -y \
-    libatlas-base-dev \
+    libopenblas-dev \
     libopenblas0 \
-    liblapack3
+    liblapack3 \
+    liblapack-dev
 
 # Audio: PortAudio dev headers (needed to build the sounddevice pip wheel)
 # and libsndfile (for soundfile)
@@ -130,6 +142,10 @@ pip install \
     sounddevice \
     soundfile \
     pyserial
+
+# Build dlib from source (no apt package on Trixie — takes ~10-20 min on Pi 5)
+info "Building dlib from source (this takes 10-20 minutes — please wait)..."
+pip install dlib
 
 # Transcription (Whisper via faster-whisper + CTranslate2)
 # This is a large download (~500MB to 1GB including models); be patient.
