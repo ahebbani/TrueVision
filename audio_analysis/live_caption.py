@@ -28,6 +28,14 @@ class LiveCaptioner:
             last_ts = self._last_update.get(pid, 0.0)
             if (now - last_ts) < self.cfg.interval_sec:
                 continue
+            # If the recorder supports flushing in-progress audio to disk
+            # (ESP32SerialRecorder), do so before transcribing so the file exists.
+            flush = getattr(rec, 'flush_to_wav', None)
+            if flush is not None:
+                try:
+                    flush()
+                except Exception:
+                    pass
             try:
                 text_live = self.transcriber.transcribe(audio_path)
                 self._last_update[pid] = now
