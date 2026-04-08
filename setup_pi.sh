@@ -198,8 +198,16 @@ download_model \
 # ── Step 6: Configure UART for ESP32 audio ────────────────────────────────────
 info "=== Step 6/7: Configuring UART for ESP32 audio ==="
 
+# Detect Pi model — Pi 5 uses the RP1 I/O chip and needs different UART setup.
+PI_MODEL="$(cat /proc/device-tree/model 2>/dev/null || true)"
+if echo "${PI_MODEL}" | grep -q "Pi 5"; then
+    IS_PI5=1
+    info "Detected Raspberry Pi 5 — applying Pi 5 UART configuration."
+else
+    IS_PI5=0
+fi
+
 # Enable serial hardware and disable the login console via raspi-config
-# Noninteractive mode: 0 = disable, 1 = enable
 if command -v raspi-config &>/dev/null; then
     sudo raspi-config nonint do_serial_hw 0   # Enable serial hardware
     sudo raspi-config nonint do_serial_cons 1 # Disable login shell over serial
@@ -209,6 +217,27 @@ else
     warn "  sudo raspi-config → Interface Options → Serial Port"
     warn "  'Login shell over serial?' → No"
     warn "  'Enable serial hardware?' → Yes"
+fi
+
+# Pi 5 specific: the RP1 PL011 UART needs dtoverlay=uart0 to route it to
+# GPIO14/15. Without this the pins are not connected to /dev/ttyAMA0 properly.
+# Pi 5 config lives at /boot/firmware/config.txt (not /boot/config.txt).
+if [[ ${IS_PI5} -eq 1 ]]; then
+    CFG="/boot/firmware/config.txt"
+    if [[ -f "${CFG}" ]]; then
+        if ! grep -q "dtoverlay=uart0" "${CFG}"; then
+            echo "dtoverlay=uart0" | sudo tee -a "${CFG}" >/dev/null
+            success "Pi 5: added dtoverlay=uart0 to ${CFG}"
+        else
+            success "Pi 5: dtoverlay=uart0 already present in ${CFG}"
+        fi
+        if ! grep -q "enable_uart=1" "${CFG}"; then
+            echo "enable_uart=1" | sudo tee -a "${CFG}" >/dev/null
+            success "Pi 5: added enable_uart=1 to ${CFG}"
+        fi
+    else
+        warn "${CFG} not found — add these lines manually:\n  enable_uart=1\n  dtoverlay=uart0"
+    fi
 fi
 
 # Disable serial-getty services so they don't hold the port
