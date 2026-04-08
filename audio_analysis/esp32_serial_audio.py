@@ -449,6 +449,12 @@ class ESP32SerialAudioReceiver:
             
             if len(audio_bytes) == 0:
                 return False
+
+            # Require at least 0.5 s of audio before writing; Whisper errors or
+            # produces garbage on very short clips.
+            min_bytes = int(0.5 * self.SAMPLE_RATE * self.BYTES_PER_SAMPLE)
+            if len(audio_bytes) < min_bytes:
+                return False
             
             # Convert bytes to numpy array (16-bit signed integers)
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16)

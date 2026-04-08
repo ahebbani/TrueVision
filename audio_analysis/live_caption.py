@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
@@ -33,9 +34,17 @@ class LiveCaptioner:
             flush = getattr(rec, 'flush_to_wav', None)
             if flush is not None:
                 try:
-                    flush()
+                    flushed = flush()
                 except Exception:
-                    pass
+                    flushed = False
+                # If flush returned False the buffer was empty — file wasn't written.
+                # Skip transcription this cycle rather than erroring on a missing file.
+                if not flushed:
+                    continue
+            # For sounddevice Recorder, the file is written continuously; confirm
+            # it actually exists before handing to Whisper.
+            if not os.path.exists(audio_path):
+                continue
             try:
                 text_live = self.transcriber.transcribe(audio_path)
                 self._last_update[pid] = now
