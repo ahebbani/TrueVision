@@ -31,9 +31,13 @@ def _try_open_opencv_device(index: int, w: int, h: int, fps: int):
 
 
 def _try_open_gstreamer_libcamera(w: int, h: int, fps: int):
+    # Request BGR output directly from the pipeline so OpenCV receives frames
+    # in the format it expects without any further conversion.
+    # On Pi 5 + Trixie, libcamerasrc delivers BGR-ordered bytes; requesting
+    # format=RGB and then doing COLOR_RGB2BGR double-swaps to wrong colours.
     pipeline = (
-        f"libcamerasrc ! video/x-raw, width={w}, height={h}, framerate={fps}/1, format=RGB "
-        f"! videoconvert ! video/x-raw, format=RGB ! appsink"
+        f"libcamerasrc ! video/x-raw, width={w}, height={h}, framerate={fps}/1 "
+        f"! videoconvert ! video/x-raw, format=BGR ! appsink"
     )
     cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
     if not cap.isOpened():
@@ -47,11 +51,8 @@ def _try_open_gstreamer_libcamera(w: int, h: int, fps: int):
             return self._cap.isOpened()
 
         def read(self):
-            ok, frame = self._cap.read()
-            if not ok:
-                return ok, frame
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            return True, frame
+            # Frame arrives as BGR — no conversion needed.
+            return self._cap.read()
 
         def release(self):
             try:
@@ -63,7 +64,7 @@ def _try_open_gstreamer_libcamera(w: int, h: int, fps: int):
     if not ok:
         cap.release()
         return None
-    print("Camera: Opened via GStreamer libcamera pipeline")
+    print("Camera: Opened via GStreamer libcamera pipeline (BGR output)")
     return GstCameraCapture(cap)
 
 
@@ -74,17 +75,18 @@ def _try_open_picamera2(w: int, h: int):
         class PiCam2Capture:
             def __init__(self, width: int, height: int):
                 self._picam2 = Picamera2()
+                # BGR888 delivers native BGR bytes — no colour conversion needed
+                # and avoids the RGB/BGR ambiguity that caused the blue-tint issue
+                # on Pi 5 with Trixie.
                 config = self._picam2.create_preview_configuration(
-                    main={"size": (width, height), "format": "RGB888"}
+                    main={"size": (width, height), "format": "BGR888"}
                 )
                 self._picam2.configure(config)
                 self._picam2.start()
 
             def read(self):
-                import cv2 as _cv2
-                arr = self._picam2.capture_array()  # RGB
-                frame = _cv2.cvtColor(arr, _cv2.COLOR_RGB2BGR)
-                return True, frame
+                arr = self._picam2.capture_array()  # already BGR
+                return True, arr
 
             def isOpened(self):
                 return True

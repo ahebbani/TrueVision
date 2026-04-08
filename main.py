@@ -294,12 +294,11 @@ def recognize_face():
                 break
 
         recognized_ids_in_frame = set()
-        # In AUDIO-only mode skip the heavy face-detection computation entirely.
-        faces_info = (
-            recog.detect_and_recognize(conn, frame)
-            if current_mode[0] != MODE_AUDIO
-            else []
-        )
+        # Skip face detection only when the ESP32 is connected AND in AUDIO mode.
+        # Without an ESP32 receiver (_esp32_receiver is None), always run face
+        # detection — the mode switch is meaningless with no hardware controlling it.
+        _skip_face = (_esp32_receiver is not None and current_mode[0] == MODE_AUDIO)
+        faces_info = [] if _skip_face else recog.detect_and_recognize(conn, frame)
         if not hasattr(recognize_face, "_prev_summaries"):
             recognize_face._prev_summaries = {}
         prev_summaries = recognize_face._prev_summaries  # type: ignore[attr-defined]

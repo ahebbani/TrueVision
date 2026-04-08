@@ -63,8 +63,8 @@ def _try_open_opencv_device(index: int, w: int, h: int, fps: int):
 
 def _try_open_gstreamer_libcamera(w: int, h: int, fps: int):
     pipeline = (
-        f"libcamerasrc ! video/x-raw, width={w}, height={h}, framerate={fps}/1, format=RGB "
-        f"! videoconvert ! video/x-raw, format=RGB ! appsink"
+        f"libcamerasrc ! video/x-raw, width={w}, height={h}, framerate={fps}/1 "
+        f"! videoconvert ! video/x-raw, format=BGR ! appsink"
     )
     cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
     if not cap.isOpened():
@@ -78,11 +78,7 @@ def _try_open_gstreamer_libcamera(w: int, h: int, fps: int):
             return self._cap.isOpened()
 
         def read(self):
-            ok, frame = self._cap.read()
-            if not ok:
-                return ok, frame
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            return True, frame
+            return self._cap.read()
 
         def release(self):
             try:
@@ -94,7 +90,7 @@ def _try_open_gstreamer_libcamera(w: int, h: int, fps: int):
     if not ok:
         cap.release()
         return None
-    print("Camera: Opened via GStreamer libcamera pipeline")
+    print("Camera: Opened via GStreamer libcamera pipeline (BGR output)")
     return GstCameraCapture(cap)
 
 
@@ -106,15 +102,14 @@ def _try_open_picamera2(w: int, h: int):
             def __init__(self, width: int, height: int):
                 self._picam2 = Picamera2()
                 config = self._picam2.create_preview_configuration(
-                    main={"size": (width, height), "format": "RGB888"}
+                    main={"size": (width, height), "format": "BGR888"}
                 )
                 self._picam2.configure(config)
                 self._picam2.start()
 
             def read(self):
-                arr = self._picam2.capture_array()  # RGB
-                frame = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-                return True, frame
+                arr = self._picam2.capture_array()  # already BGR
+                return True, arr
 
             def isOpened(self):
                 return True
