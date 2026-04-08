@@ -370,15 +370,22 @@ def recognize_face():
                             )
                         else:
                             rec = Recorder()
-                        audio_path_pending = rec.start(RECORDINGS_DIR, f"person{recognized_id}")
-                        cursor.execute(
-                            "INSERT INTO meetings (person_id, started_at, audio_path) VALUES (?, datetime('now'), ?)",
-                            (recognized_id, audio_path_pending),
-                        )
-                        meeting_id = cursor.lastrowid
-                        conn.commit()
-                        active_recorders[recognized_id] = rec
-                        active_meetings[recognized_id] = meeting_id
+                        try:
+                            audio_path_pending = rec.start(RECORDINGS_DIR, f"person{recognized_id}")
+                        except Exception as _rec_err:
+                            print(f"WARNING: Could not start audio recorder ({_rec_err}). "
+                                  f"Transcription disabled. Use --no-audio to suppress this warning.")
+                            transcription_enabled = False
+                            rec = None
+                        if rec is not None:
+                            cursor.execute(
+                                "INSERT INTO meetings (person_id, started_at, audio_path) VALUES (?, datetime('now'), ?)",
+                                (recognized_id, audio_path_pending),
+                            )
+                            meeting_id = cursor.lastrowid
+                            conn.commit()
+                            active_recorders[recognized_id] = rec
+                            active_meetings[recognized_id] = meeting_id
                 else:
                     presence_state[recognized_id] = 'present'
 

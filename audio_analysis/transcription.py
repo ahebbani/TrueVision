@@ -83,6 +83,17 @@ class Recorder:
                 self._file.write(indata)
 
         assert sd is not None
+        # Check that at least one input device is available before opening the
+        # stream. sd.query_devices(-1, 'input') raises PortAudioError when no
+        # default input device exists (e.g. no microphone connected).
+        try:
+            sd.query_devices(kind='input')
+        except Exception as _dev_err:
+            raise RuntimeError(
+                f"No audio input device found ({_dev_err}). "
+                "Connect a microphone, use the ESP32 serial audio source "
+                "(--audio-source esp32-serial), or disable audio with --no-audio."
+            ) from _dev_err
         self._stream = sd.InputStream(samplerate=self.sample_rate, channels=self.channels, callback=_callback)
         self._stream.start()
         return self.audio_path
