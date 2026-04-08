@@ -98,6 +98,9 @@ def parse_args():
                    help='Audio input source: auto (prefer ESP32 UART if streaming), sounddevice (local mic), or esp32-serial (force ESP32 via UART)')
     p.add_argument('--serial-port', default='/dev/serial0', help='Serial port for ESP32 audio (default: /dev/serial0)')
     p.add_argument('--serial-baud', type=int, default=921600, help='Baud rate for ESP32 serial (default: 921600)')
+    p.add_argument('--no-mode-gate', action='store_true', default=False,
+                   help='Disable ESP32 mode-based face/audio gating — run both simultaneously. '
+                        'Use this when the hardware mode switch is not connected.')
     # UI/overlay flags
     p.add_argument('--overlay-only', action='store_true', default=OVERLAY_ONLY_DEFAULT)
     # Audio enable/disable flags
@@ -294,10 +297,10 @@ def recognize_face():
                 break
 
         recognized_ids_in_frame = set()
-        # Skip face detection only when the ESP32 is connected AND in AUDIO mode.
-        # Without an ESP32 receiver (_esp32_receiver is None), always run face
-        # detection — the mode switch is meaningless with no hardware controlling it.
-        _skip_face = (_esp32_receiver is not None and current_mode[0] == MODE_AUDIO)
+        # Skip face detection only when the ESP32 is connected AND in AUDIO mode,
+        # unless --no-mode-gate is set (for testing without the hardware switch).
+        _mode_gate_active = (_esp32_receiver is not None) and not getattr(args, 'no_mode_gate', False)
+        _skip_face = _mode_gate_active and (current_mode[0] == MODE_AUDIO)
         faces_info = [] if _skip_face else recog.detect_and_recognize(conn, frame)
         if not hasattr(recognize_face, "_prev_summaries"):
             recognize_face._prev_summaries = {}

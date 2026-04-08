@@ -20,6 +20,7 @@ endif
 help:
 	@echo "Targets:"
 	@echo "  run                 - Run full system (video + audio)"
+	@echo "  run-esp32           - Run with ESP32 UART audio + face recognition simultaneously (no mode gate)"
 	@echo "  run-no-audio        - Run video only (disable audio/transcription)"
 	@echo "  run-overlay-no-audio- Run overlay-only video with no audio (lighter)"
 	@echo "  run-speak           - Run full system with spoken captions (TTS)"
@@ -31,6 +32,9 @@ help:
 
 run:
 	$(PY) main.py
+
+run-esp32:
+	$(PY) main.py --audio-source esp32-serial --no-mode-gate
 
 run-speak:
 	$(PY) main.py --speak-captions
