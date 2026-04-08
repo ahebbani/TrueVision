@@ -114,14 +114,16 @@ success "apt dependencies installed."
 info "=== Step 3/7: Setting up Python virtual environment ==="
 
 VENV_DIR="${REPO_DIR}/.venv"
+# Always (re)create the venv to guarantee --system-site-packages is set.
+# This flag is required so the venv can see apt-installed python3-opencv and
+# python3-picamera2. A venv created without it will cause pip to target the
+# system Python and hit the "externally managed environment" error on Trixie.
 if [[ -d "${VENV_DIR}" ]]; then
-    warn ".venv already exists — skipping creation. Delete it manually and re-run to start fresh."
-else
-    # --system-site-packages is critical: lets the venv see apt-installed
-    # python3-opencv, python3-dlib, and python3-picamera2
-    python3 -m venv "${VENV_DIR}" --system-site-packages
-    success "Virtual environment created at .venv"
+    warn ".venv already exists — removing and recreating to ensure correct flags..."
+    rm -rf "${VENV_DIR}"
 fi
+python3 -m venv "${VENV_DIR}" --system-site-packages
+success "Virtual environment created at .venv (--system-site-packages)"
 
 # Activate for the remainder of this script
 # shellcheck source=/dev/null
