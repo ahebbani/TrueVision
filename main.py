@@ -364,7 +364,8 @@ def recognize_face():
                         transcription_enabled,
                         prev_summary=prev_summary,
                     )
-                    if transcription_enabled and recognized_id not in active_recorders and current_mode[0] != MODE_FACE:
+                    mode_allows_recording = (not _mode_gate_active) or (current_mode[0] != MODE_FACE)
+                    if transcription_enabled and recognized_id not in active_recorders and mode_allows_recording:
                         if create_recorder:
                             rec = create_recorder(
                                 audio_source=args.audio_source,

@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Prove ESP32 is packetizing audio correctly (UART framing validation).
+"""Prove ESP32 UART framing is correct for the current TrueVision firmware.
 
-This script is intentionally "chatty": it prints evidence that the incoming
-byte stream is correctly framed into packets as defined by the ESP32 firmware.
+This script is intentionally chatty. It validates the packet stream produced by
+esp32_firmware/truevision_main.ino and explains whether the Pi is receiving:
 
-Protocol (matches esp32_firmware/i2s_uart_audio_streamer.ino and
-audio_analysis/esp32_serial_audio.py):
-    [SYNC(0xAA 0x55)] [LENGTH(2 bytes LE)] [AUDIO_DATA] [CHECKSUM(1 byte)]
+- valid audio packets
+- only control packets (link works, audio currently suppressed)
+- raw bytes that never decode into valid packets (usually a baud mismatch)
+
+Protocol (matches truevision_main.ino and audio_analysis/esp32_serial_audio.py):
+    [SYNC(0xAA 0x55)] [TYPE(1)] [LENGTH(2 bytes LE)] [DATA] [CHECKSUM(1)]
 
 Validation performed:
 - Finds SYNC pattern in raw byte stream (proves packet boundaries exist)
+- Parses TYPE to distinguish audio frames from control traffic
 - Parses LENGTH and enforces sane bounds
 - Reads exactly LENGTH payload bytes
 - Verifies CHECKSUM == (sum(payload) & 0xFF)
@@ -44,14 +48,37 @@ else:
 SYNC = b"\xAA\x55"
 MAX_LEN = 4096
 
+PKT_AUDIO = 0x01
+PKT_MODE_CHANGE = 0x02
+PKT_MARKER = 0x03
+PKT_DIAG_REQUEST = 0x04
+PKT_HEARTBEAT = 0x10
+PKT_PI_STATUS = 0x11
+PKT_ACK = 0x12
+
+PKT_NAMES = {
+    PKT_AUDIO: "AUDIO",
+    PKT_MODE_CHANGE: "MODE_CHANGE",
+    PKT_MARKER: "MARKER",
+    PKT_DIAG_REQUEST: "DIAG_REQUEST",
+    PKT_HEARTBEAT: "HEARTBEAT",
+    PKT_PI_STATUS: "PI_STATUS",
+    PKT_ACK: "ACK",
+}
+
 
 @dataclass
 class Packet:
+    packet_type: int
     length: int
     payload: bytes
     expected_checksum: int
     actual_checksum: int
     checksum_ok: bool
+
+
+def _packet_name(packet_type: int) -> str:
+    return PKT_NAMES.get(packet_type, f"0x{packet_type:02X}")
 
 
 def _print_ports() -> int:
@@ -148,8 +175,8 @@ def _extract_one_packet(buf: bytearray) -> Optional[Packet]:
     On failure/incomplete: returns None (buf may be trimmed to resync).
     """
 
-    # Need at least sync + len + checksum minimal.
-    if len(buf) < 2 + 2 + 1:
+    # Need at least sync + type + len + checksum minimal.
+    if len(buf) < 2 + 1 + 2 + 1:
         return None
 
     # Sync must be at start; otherwise, resync to the next occurrence.
@@ -165,28 +192,30 @@ def _extract_one_packet(buf: bytearray) -> Optional[Packet]:
             return None
         if idx > 0:
             del buf[:idx]
-        if len(buf) < 2 + 2 + 1:
+        if len(buf) < 2 + 1 + 2 + 1:
             return None
 
-    length = struct.unpack_from('<H', buf, 2)[0]
+    packet_type = buf[2]
+    length = struct.unpack_from('<H', buf, 3)[0]
 
-    if length == 0 or length > MAX_LEN:
+    if length > MAX_LEN:
         # Bad length: drop first sync byte and resync.
         del buf[0:1]
         return None
 
-    total = 2 + 2 + length + 1
+    total = 2 + 1 + 2 + length + 1
     if len(buf) < total:
         return None
 
-    payload = bytes(buf[4 : 4 + length])
-    expected = buf[4 + length]
+    payload = bytes(buf[5 : 5 + length])
+    expected = buf[5 + length]
     actual = sum(payload) & 0xFF
     ok = expected == actual
 
     del buf[:total]
 
     return Packet(
+        packet_type=packet_type,
         length=length,
         payload=payload,
         expected_checksum=expected,
@@ -258,6 +287,7 @@ def main() -> int:
 
     buf = bytearray()
     good = 0
+    control = 0
     bad_checksum = 0
     bad_length = 0
     resyncs = 0
@@ -311,19 +341,28 @@ def main() -> int:
                         )
                     continue
 
+                last_sync_seen_at = now
+
+                if pkt.packet_type != PKT_AUDIO:
+                    control += 1
+                    if args.verbose or control <= 3:
+                        print(
+                            f"CTRL #{control:05d} type={_packet_name(pkt.packet_type)} len={pkt.length} checksum=0x{pkt.actual_checksum:02X}"
+                        )
+                    continue
+
                 # Heuristic: treat non-even lengths as bad length for PCM16.
                 if pkt.length % 2 != 0:
                     bad_length += 1
                     if args.verbose:
-                        print(f"BAD  len={pkt.length} (not divisible by 2 for PCM16)")
+                        print(f"BAD  type=AUDIO len={pkt.length} (not divisible by 2 for PCM16)")
                     continue
 
                 good += 1
-                last_sync_seen_at = now
 
                 if args.verbose or good <= 5:
                     stats = _audio_stats(pkt.payload)
-                    line = f"OK   #{good:05d} len={pkt.length:4d} checksum=0x{pkt.actual_checksum:02X} {stats}"
+                    line = f"OK   #{good:05d} type=AUDIO len={pkt.length:4d} checksum=0x{pkt.actual_checksum:02X} {stats}"
                     if args.show_samples:
                         line += f" samples0={_format_sample_preview(pkt.payload)}"
                     print(line)
@@ -332,7 +371,7 @@ def main() -> int:
                     elapsed = now - start
                     rate = good / elapsed if elapsed > 0 else 0.0
                     print(
-                        f"SUMMARY t={elapsed:5.1f}s good={good} bad_checksum={bad_checksum} bad_len={bad_length} resyncs~={resyncs} pkts/s={rate:.1f}"
+                        f"SUMMARY t={elapsed:5.1f}s audio={good} control={control} bad_checksum={bad_checksum} bad_len={bad_length} resyncs~={resyncs} audio_pkts/s={rate:.1f}"
                     )
 
                 if args.max_packets and good >= int(args.max_packets):
@@ -361,30 +400,35 @@ def main() -> int:
     print(f"Port: {port}  Baud: {args.baud}")
     print(f"Elapsed: {elapsed:.2f}s")
     print(f"Raw bytes received: {raw_bytes}")
-    print(f"Valid packets (checksum OK): {good}")
+    print(f"Valid audio packets (checksum OK): {good}")
+    print(f"Valid control packets (checksum OK): {control}")
     print(f"Checksum failures: {bad_checksum}")
-    print(f"Bad length (PCM16 divisibility): {bad_length}")
+    print(f"Bad audio length (PCM16 divisibility): {bad_length}")
     print(f"Resync events (saw SYNC mid-stream): ~{resyncs}")
     if good > 0 and elapsed > 0:
         print(f"Packet rate: {good/elapsed:.2f} packets/s")
         # Typical packet length from firmware: BUFFER_SIZE=512 samples => 1024 bytes.
-        print("Expected length from firmware default: 1024 bytes (512 samples)")
+        print("Expected audio payload length from firmware default: 1024 bytes (512 samples)")
 
     if good == 0:
-        print("\nNo valid packets received.")
+        print("\nNo valid audio packets received.")
+        if control > 0:
+            print("\nControl traffic is present, so UART framing works but audio streaming is currently disabled.")
+            print("This usually means the ESP32 is in FACE mode or the I2S capture path is not producing audio packets.")
+            return 1
         if raw_bytes > 0:
-            print("\nWe DID receive bytes, but never saw the SYNC sequence 0xAA 0x55.")
+            print("\nWe DID receive bytes, but they never decoded into valid framed packets.")
             print("This usually means one of:")
-            print("- ESP32 is not running the packetizing audio streamer sketch")
             print("- Baud rate mismatch (you'll read garbage bytes)")
             print("- Another sketch is printing text/logs instead of binary packets")
+            print("- The ESP32 stream is corrupted on the wire")
             print("\nTry:")
-            print("- Flash esp32_firmware/i2s_uart_audio_streamer.ino")
+            print("- Flash esp32_firmware/truevision_main.ino")
             print("- Ensure Serial Monitor is closed (port not busy)")
             print("- Re-run with --baud 921600 (firmware default)")
             print("- Optional sanity: set --baud 115200 and see if you get readable boot logs")
         print("Quick checks:")
-        print("- Confirm ESP32 is running i2s_uart_audio_streamer.ino")
+        print("- Confirm ESP32 is running truevision_main.ino")
         print("- On macOS, pick the correct /dev/cu.* port: --list-ports")
         print("- Verify baud matches firmware (default 921600)")
         return 1

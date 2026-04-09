@@ -117,6 +117,13 @@
 // Serial0 always maps to UART0 hardware pins.
 static HardwareSerial &UART0 = Serial0;
 
+// ─── Test / Production Feature Flags ────────────────────────────────────────
+// Default these to 0 for the current bring-up setup: bare ESP32 + mic + UART.
+// Set them to 1 on the production PCB once the external switch/button/LEDs are wired.
+#define ENABLE_STATUS_LEDS    0
+#define ENABLE_MARKER_BUTTON  0
+#define ENABLE_MODE_SWITCH    0
+
 // ─── Protocol ────────────────────────────────────────────────────────────────
 #define SYNC_BYTE_1       0xAA
 #define SYNC_BYTE_2       0x55
@@ -182,6 +189,22 @@ static volatile LedPattern s_led2 = LED_OFF;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+static inline void set_audio_led(bool on) {
+#if ENABLE_STATUS_LEDS
+    digitalWrite(LED_AUDIO_PIN, on ? HIGH : LOW);
+#else
+    (void)on;
+#endif
+}
+
+static inline void set_link_led(bool on) {
+#if ENABLE_STATUS_LEDS
+    digitalWrite(LED_LINK_PIN, on ? HIGH : LOW);
+#else
+    (void)on;
+#endif
+}
+
 /**
  * Build a framed packet into buf[].
  * Returns total number of bytes written (including sync, type, len, data, checksum).
@@ -220,6 +243,11 @@ static void send_control_packet(uint8_t type, const uint8_t *data, uint16_t data
 // ─── LED State Machine (called from Supervisor every tick) ───────────────────
 
 static void led_tick(uint32_t now_ms) {
+#if !ENABLE_STATUS_LEDS
+    (void)now_ms;
+    return;
+#endif
+
     static bool     l1 = false, l2 = false;
     static uint32_t l1_last = 0, l2_last = 0;
 
@@ -249,8 +277,8 @@ static void led_tick(uint32_t now_ms) {
             l2 = !l1; break;
     }
 
-    digitalWrite(LED_AUDIO_PIN, l1 ? HIGH : LOW);
-    digitalWrite(LED_LINK_PIN,  l2 ? HIGH : LOW);
+    set_audio_led(l1);
+    set_link_led(l2);
 }
 
 /** Derive LED patterns from current system state (called each Supervisor tick). */
@@ -464,22 +492,25 @@ static void task_supervisor(void *) {
         // ── Diagnostic ACK flash (from UART_RX signal) ────────────────────────
         if (s_diag_ack_pending) {
             s_diag_ack_pending = false;
+#if ENABLE_STATUS_LEDS
             // 3× alternating LED flash to confirm DIAG_REQUEST was acknowledged
             for (int f = 0; f < 3; f++) {
-                digitalWrite(LED_AUDIO_PIN, HIGH);
-                digitalWrite(LED_LINK_PIN,  LOW);
+                set_audio_led(true);
+                set_link_led(false);
                 vTaskDelay(pdMS_TO_TICKS(150));
-                digitalWrite(LED_AUDIO_PIN, LOW);
-                digitalWrite(LED_LINK_PIN,  HIGH);
+                set_audio_led(false);
+                set_link_led(true);
                 vTaskDelay(pdMS_TO_TICKS(150));
             }
-            digitalWrite(LED_AUDIO_PIN, LOW);
-            digitalWrite(LED_LINK_PIN,  LOW);
+            set_audio_led(false);
+            set_link_led(false);
+#endif
             last_tick = millis();  // reset tick after blocking flash
             continue;
         }
 
         // ── Mode Switch ──────────────────────────────────────────────────────
+#if ENABLE_MODE_SWITCH
         bool pin_a = (digitalRead(MODE_PIN_A) == HIGH);
         bool pin_b = (digitalRead(MODE_PIN_B) == HIGH);
 
@@ -504,8 +535,14 @@ static void task_supervisor(void *) {
             uint8_t payload   = new_mode;
             send_control_packet(PKT_MODE_CHANGE, &payload, 1);
         }
+#else
+        s_mode_invalid    = false;
+        s_mode            = MODE_AUDIO;
+        s_last_valid_mode = MODE_AUDIO;
+#endif
 
         // ── Button Debounce ──────────────────────────────────────────────────
+#if ENABLE_MARKER_BUTTON
         bool btn_raw = (digitalRead(BUTTON_PIN) == HIGH);  // HIGH = not pressed
         if (btn_raw != btn_stable) {
             if ((now - btn_chg_ms) >= BUTTON_DEBOUNCE_MS) {
@@ -534,6 +571,7 @@ static void task_supervisor(void *) {
             btn_long_done = true;
             send_control_packet(PKT_DIAG_REQUEST, nullptr, 0);
         }
+#endif
 
         // ── LED Pattern Update ───────────────────────────────────────────────
         update_led_patterns(now);
@@ -576,14 +614,20 @@ static bool init_i2s() {
 // ─── setup() ─────────────────────────────────────────────────────────────────
 void setup() {
     // GPIO
+#if ENABLE_STATUS_LEDS
     pinMode(LED_AUDIO_PIN, OUTPUT);
     pinMode(LED_LINK_PIN,  OUTPUT);
+#endif
+#if ENABLE_MARKER_BUTTON
     pinMode(BUTTON_PIN,    INPUT_PULLUP);
+#endif
     // GPIO 35/36 are input-only on classic ESP32; PCB provides pull resistors.
+#if ENABLE_MODE_SWITCH
     pinMode(MODE_PIN_A, INPUT);
     pinMode(MODE_PIN_B, INPUT);
-    digitalWrite(LED_AUDIO_PIN, LOW);
-    digitalWrite(LED_LINK_PIN,  LOW);
+#endif
+    set_audio_led(false);
+    set_link_led(false);
 
     // UART
     UART0.begin(UART_BAUD_RATE);
@@ -591,19 +635,24 @@ void setup() {
 
     // Watchdog / panic reset indicator — both LEDs solid for 2 s
     esp_reset_reason_t rst = esp_reset_reason();
+#if ENABLE_STATUS_LEDS
     if (rst == ESP_RST_WDT      || rst == ESP_RST_PANIC  ||
         rst == ESP_RST_INT_WDT  || rst == ESP_RST_TASK_WDT) {
-        digitalWrite(LED_AUDIO_PIN, HIGH);
-        digitalWrite(LED_LINK_PIN,  HIGH);
+        set_audio_led(true);
+        set_link_led(true);
         delay(2000);
-        digitalWrite(LED_AUDIO_PIN, LOW);
-        digitalWrite(LED_LINK_PIN,  LOW);
+        set_audio_led(false);
+        set_link_led(false);
     }
+#else
+    (void)rst;
+#endif
 
     // Mutex for serialising UART writes from multiple tasks
     s_uart_tx_mutex = xSemaphoreCreateMutex();
 
     // Read initial mode from switch before spawning tasks
+#if ENABLE_MODE_SWITCH
     bool pa = (digitalRead(MODE_PIN_A) == HIGH);
     bool pb = (digitalRead(MODE_PIN_B) == HIGH);
     if (pa && !pb) {
@@ -615,6 +664,11 @@ void setup() {
         s_mode             = MODE_AUDIO;  // safe default
         s_last_valid_mode  = MODE_AUDIO;
     }
+#else
+    s_mode_invalid     = false;
+    s_mode             = MODE_AUDIO;
+    s_last_valid_mode  = MODE_AUDIO;
+#endif
 
     // Seed heartbeat timer (avoid spurious timeout immediately on boot)
     s_hb_last_ms = millis();

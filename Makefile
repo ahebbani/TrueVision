@@ -34,7 +34,7 @@ run:
 	$(PY) main.py
 
 run-esp32:
-	$(PY) main.py --audio-source esp32-serial --no-mode-gate --serial-baud 460800
+	$(PY) main.py --audio-source esp32-serial --no-mode-gate --serial-baud 921600
 
 run-speak:
 	$(PY) main.py --speak-captions
