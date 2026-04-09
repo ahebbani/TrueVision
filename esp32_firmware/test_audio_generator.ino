@@ -6,7 +6,8 @@
  * 
  * Hardware Requirements:
  * - ESP32 Dev Board
- * - 3 wires to Raspberry Pi (TX, RX, GND)
+ * - 2 wires to Raspberry Pi for one-way testing (TX, GND)
+ * - Optional 3rd signal wire (Pi TX -> ESP32 RX) if you want bidirectional tests later
  * 
  * UART to Raspberry Pi:
  * - ESP32 TX (GPIO 1)  -> Pi RX (Physical Pin 10, GPIO 15)
@@ -16,9 +17,14 @@
  * Test Modes:
  * 1. Sine wave tone (440 Hz A note)
  * 2. Sweep tone (200-800 Hz)
- * 3. Simulated speech pattern (varying frequencies and amplitudes)
+ * 3. Speech-like synthetic pattern (varying frequencies and amplitudes)
  * 
  * Change TEST_MODE below to select different test signals.
+ *
+ * Notes:
+ * - This sketch is for UART framing and audio-path validation, not speech recognition validation.
+ * - Keep the Arduino Serial Monitor closed while streaming to the Raspberry Pi because UART0
+ *   is shared with the packet stream.
  * 
  * Author: TrueVision Project
  * Date: January 2026
@@ -36,6 +42,7 @@
 // Protocol bytes
 #define SYNC_BYTE_1       0xAA
 #define SYNC_BYTE_2       0x55
+#define PKT_AUDIO         0x01
 
 // Test mode selection
 #define TEST_MODE_SINE    1  // Constant 440 Hz tone
@@ -46,7 +53,7 @@
 
 // Buffers
 int16_t audio_buffer[BUFFER_SIZE];
-uint8_t uart_packet[BUFFER_SIZE * 2 + 5];
+uint8_t uart_packet[BUFFER_SIZE * 2 + 6];
 
 // Test signal state
 float phase = 0.0;
@@ -57,38 +64,6 @@ unsigned long sample_counter = 0;
 void setup() {
   // Initialize UART
   Serial.begin(UART_BAUD_RATE);
-  while (!Serial) {
-    delay(10);
-  }
-  
-  Serial.println("\n=================================");
-  Serial.println("ESP32 Test Audio Generator");
-  Serial.println("=================================");
-  Serial.print("Sample Rate: ");
-  Serial.print(SAMPLE_RATE);
-  Serial.println(" Hz");
-  Serial.print("Buffer Size: ");
-  Serial.print(BUFFER_SIZE);
-  Serial.println(" samples");
-  Serial.print("Test Mode: ");
-  
-  switch (TEST_MODE) {
-    case TEST_MODE_SINE:
-      Serial.println("Sine Wave (440 Hz)");
-      break;
-    case TEST_MODE_SWEEP:
-      Serial.println("Frequency Sweep (200-800 Hz)");
-      break;
-    case TEST_MODE_SPEECH:
-      Serial.println("Simulated Speech Pattern");
-      break;
-    default:
-      Serial.println("Unknown");
-  }
-  
-  Serial.println("=================================");
-  Serial.println("Streaming test audio to UART...");
-  Serial.println("Connect to Raspberry Pi to receive.");
   delay(1000);
 }
 
@@ -119,8 +94,9 @@ void generate_sweep() {
 }
 
 void generate_speech_pattern() {
-  // Simulate speech-like patterns with varying frequency and amplitude
-  // This creates a more realistic test signal that Whisper might recognize
+  // Simulate speech-like patterns with varying frequency and amplitude.
+  // This is useful for waveform/path testing, but it is still synthetic audio,
+  // so speech-to-text should not be expected to produce meaningful words.
   
   for (int i = 0; i < BUFFER_SIZE; i++) {
     unsigned long total_samples = sample_counter + i;
@@ -170,13 +146,15 @@ void loop() {
   
   sample_counter += BUFFER_SIZE;
   
-  // Build UART packet
+  // Build UART packet using the current TrueVision framed protocol:
+  // [SYNC][TYPE][LEN_LO][LEN_HI][DATA][CHECKSUM]
   size_t audio_bytes = BUFFER_SIZE * sizeof(int16_t);
   size_t packet_idx = 0;
   
   // Sync bytes
   uart_packet[packet_idx++] = SYNC_BYTE_1;
   uart_packet[packet_idx++] = SYNC_BYTE_2;
+  uart_packet[packet_idx++] = PKT_AUDIO;
   
   // Length (little-endian uint16)
   uart_packet[packet_idx++] = audio_bytes & 0xFF;
