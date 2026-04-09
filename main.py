@@ -97,7 +97,7 @@ def parse_args():
     p.add_argument('--audio-source', default='auto', choices=['auto', 'sounddevice', 'esp32-serial'],
                    help='Audio input source: auto (prefer ESP32 UART if streaming), sounddevice (local mic), or esp32-serial (force ESP32 via UART)')
     p.add_argument('--serial-port', default='/dev/serial0', help='Serial port for ESP32 audio (default: /dev/serial0)')
-    p.add_argument('--serial-baud', type=int, default=460800, help='Baud rate for ESP32 serial (default: 460800; use this on Pi 5 — 921600 is unreliable on the RP1 UART)')
+    p.add_argument('--serial-baud', type=int, default=921600, help='Baud rate for ESP32 serial')
     p.add_argument('--no-mode-gate', action='store_true', default=False,
                    help='Disable ESP32 mode-based face/audio gating — run both simultaneously. '
                         'Use this when the hardware mode switch is not connected.')
