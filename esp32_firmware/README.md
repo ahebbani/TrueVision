@@ -158,6 +158,11 @@ If you need the Pi to ignore firmware mode packets and force simultaneous face r
 make run-esp32-force-both
 ```
 
+For Pi-side overrides without touching the ESP32 switch state:
+
+- `make run-audio` forces audio-only mode and uses ESP32 UART audio.
+- `make run-face` forces face-only mode and disables audio/transcription.
+
 ## Troubleshooting
 
 ### No Audio / Silent Output

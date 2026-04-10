@@ -19,6 +19,14 @@ class LiveCaptioner:
         self._last_update: Dict[int, float] = {}
         self._captions: Dict[int, str] = {}
 
+    def clear(self, pid: int) -> None:
+        self._last_update.pop(pid, None)
+        self._captions.pop(pid, None)
+
+    def clear_all(self) -> None:
+        self._last_update.clear()
+        self._captions.clear()
+
     def update(self, active_recorders: Dict[int, object], active_meetings: Dict[int, int], cursor) -> None:
         now = time.time()
         for pid, rec in list(active_recorders.items()):
@@ -69,11 +77,3 @@ class LiveCaptioner:
         if self._captions:
             return next(iter(self._captions.values()))
         return None
-
-    def remove_caption(self, pid: int) -> None:
-        self._last_update.pop(pid, None)
-        self._captions.pop(pid, None)
-
-    def clear(self) -> None:
-        self._last_update.clear()
-        self._captions.clear()

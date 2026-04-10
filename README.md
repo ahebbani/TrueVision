@@ -89,6 +89,11 @@ If you want the Raspberry Pi to ignore firmware mode packets and force both subs
 make run-esp32-force-both
 ```
 
+Direct Pi-side overrides are also available:
+
+- `make run-audio` forces `AUDIO` mode from the Pi side and uses ESP32 UART audio only.
+- `make run-face` replaces the old `make run-no-audio` target and forces `FACE` mode with audio/transcription disabled.
+
 Testing board vs production board:
 
 - Testing board:

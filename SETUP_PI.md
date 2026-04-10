@@ -263,7 +263,7 @@ python3 main.py
 
 ## 9) Start on boot (systemd)
 
-The most reliable way to run on boot is a `systemd` service that executes `make run-no-audio`.
+The most reliable way to run on boot is a `systemd` service that executes `make run-face`.
 
 ### Option A (recommended): install the service using the repo script
 
@@ -299,7 +299,7 @@ sudo nano /etc/systemd/system/truevision.service
 
 ```ini
 [Unit]
-Description=TrueVision (make run-no-audio)
+Description=TrueVision (make run-face)
 After=network-online.target
 Wants=network-online.target
 
@@ -308,7 +308,7 @@ Type=simple
 User=pi
 WorkingDirectory=/home/pi/Files/TrueVision
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/make -C /home/pi/Files/TrueVision run-no-audio
+ExecStart=/usr/bin/make -C /home/pi/Files/TrueVision run-face
 Restart=on-failure
 RestartSec=2
 

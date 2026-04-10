@@ -101,6 +101,8 @@ def parse_args():
     p.add_argument('--no-mode-gate', action='store_true', default=False,
                    help='Disable ESP32 mode-based face/audio gating — run both simultaneously. '
                         'Use this when the hardware mode switch is not connected.')
+    p.add_argument('--force-mode', choices=['audio', 'face', 'both'],
+                   help='Force runtime mode from the Pi side and ignore ESP32 mode packets.')
     # UI/overlay flags
     p.add_argument('--overlay-only', action='store_true', default=OVERLAY_ONLY_DEFAULT)
     # Audio enable/disable flags
@@ -145,8 +147,6 @@ def recognize_face():
     transcription_enabled = args.audio
     active_recorders = {}
     active_meetings = {}
-    live_captions = {}
-    ESP32_CONTINUOUS_KEY = -1
     Recorder = None
     create_recorder = None
     Transcriber = None
@@ -170,21 +170,31 @@ def recognize_face():
     # ── ESP32 mode switch and marker integration ──────────────────────────────
     # current_mode is a one-element list so the closures below can mutate it.
     from audio_analysis.esp32_serial_audio import MODE_AUDIO, MODE_FACE, MODE_BOTH
-    current_mode = [MODE_BOTH]
+    forced_mode = {
+        'audio': MODE_AUDIO,
+        'face': MODE_FACE,
+        'both': MODE_BOTH,
+    }.get(args.force_mode)
+    current_mode = [forced_mode if forced_mode is not None else MODE_BOTH]
+    AUDIO_SESSION_KEY = -1
     # Thread-safe queue for marker events (PKT_MARKER from ESP32 button).
     # The main loop drains the queue and appends [MARKER HH:MM:SS] to the
     # active meeting transcript.
     _marker_queue: queue.Queue = queue.Queue()
 
-    def _on_mode_change(mode_byte: int) -> None:
-        current_mode[0] = mode_byte
+    def _mode_label(mode_byte: int) -> str:
         if mode_byte == MODE_FACE:
-            label = "FACE"
-        elif mode_byte == MODE_AUDIO:
-            label = "AUDIO"
-        else:
-            label = "BOTH"
-        print(f"ESP32: Mode changed to {label}")
+            return "FACE"
+        if mode_byte == MODE_AUDIO:
+            return "AUDIO"
+        return "BOTH"
+
+    def _on_mode_change(mode_byte: int) -> None:
+        if forced_mode is not None:
+            print(f"ESP32: Mode packet {_mode_label(mode_byte)} ignored (forced {_mode_label(forced_mode)})")
+            return
+        current_mode[0] = mode_byte
+        print(f"ESP32: Mode changed to {_mode_label(mode_byte)}")
 
     def _on_marker() -> None:
         _marker_queue.put(datetime.now().strftime("%H:%M:%S"))
@@ -228,6 +238,15 @@ def recognize_face():
             print(f"WARNING: Transcriber initialization failed ({e}). Transcription disabled.")
             transcription_enabled = False
 
+    captioner = None
+    if transcription_enabled and transcriber is not None:
+        from audio_analysis.live_caption import LiveCaptioner, CaptionConfig
+
+        captioner = LiveCaptioner(
+            transcriber,
+            CaptionConfig(interval_sec=args.caption_interval, max_words=args.caption_max_words),
+        )
+
     # Optional caption speaker (TTS)
     speaker = None
     if getattr(args, 'speak_captions', False):
@@ -247,45 +266,81 @@ def recognize_face():
             print(f"WARNING: Caption speaker init failed ({e}). Speech disabled.")
             speaker = None
 
-    def _mode_label(mode_byte: int) -> str:
-        if mode_byte == MODE_FACE:
-            return "FACE"
-        if mode_byte == MODE_AUDIO:
-            return "AUDIO"
-        return "BOTH"
+    def _oled_show_person(name: str, seen_count: Optional[int], last_seen: Optional[str], rec: bool, prev_summary: Optional[str] = None):
+        if not _oled:
+            return
+        lines = [name or "Unknown"]
+        meta = []
+        if seen_count is not None:
+            meta.append(f"seen {seen_count}")
+        if last_seen:
+            meta.append(f"last {last_seen}")
+        if meta:
+            lines.append(" • ".join(meta))
+        if prev_summary:
+            lines.append(prev_summary)
+        if rec:
+            lines.append("REC")
+        _oled.update_text(lines)
 
-    def _get_captioner():
-        from audio_analysis.live_caption import LiveCaptioner, CaptionConfig
+    def _oled_idle():
+        if not _oled:
+            return
+        _oled.update_text(["No one", datetime.now().strftime("%H:%M:%S")])
 
-        if not hasattr(recognize_face, "_captioner"):
-            recognize_face._captioner = LiveCaptioner(
-                transcriber,
-                CaptionConfig(interval_sec=args.caption_interval, max_words=args.caption_max_words),
+    try:
+        if _oled:
+            _oled.update_text(["Ready", datetime.now().strftime("%H:%M:%S")])
+    except Exception:
+        pass
+
+    def _start_session(session_key: int, *, person_id: Optional[int], label_prefix: str) -> None:
+        nonlocal transcription_enabled
+        if not transcription_enabled or session_key in active_recorders:
+            return
+        if create_recorder:
+            rec = create_recorder(
+                audio_source=args.audio_source,
+                serial_port=args.serial_port,
+                serial_baud=args.serial_baud,
             )
-        return recognize_face._captioner  # type: ignore[attr-defined]
-
-    def _clear_caption_for(pid: int) -> None:
-        captioner = getattr(recognize_face, "_captioner", None)
-        if captioner is not None:
-            captioner.remove_caption(pid)
-
-    def _clear_all_captions() -> None:
-        captioner = getattr(recognize_face, "_captioner", None)
-        if captioner is not None:
-            captioner.clear()
-
-    def _finalize_recorder(pid: int, reason: str) -> None:
-        rec = active_recorders.pop(pid, None)
-        if rec is None:
+        else:
+            rec = Recorder()
+        try:
+            audio_path_pending = rec.start(RECORDINGS_DIR, label_prefix)
+        except Exception as _rec_err:
+            print(f"WARNING: Could not start audio recorder ({_rec_err}). "
+                  f"Transcription disabled. Use --no-audio to suppress this warning.")
+            transcription_enabled = False
             return
 
-        meeting_id = active_meetings.pop(pid, None)
+        active_recorders[session_key] = rec
+        if captioner is not None:
+            captioner.clear(session_key)
+
+        if person_id is not None:
+            cursor.execute(
+                "INSERT INTO meetings (person_id, started_at, audio_path) VALUES (?, datetime('now'), ?)",
+                (person_id, audio_path_pending),
+            )
+            active_meetings[session_key] = cursor.lastrowid
+            conn.commit()
+
+    def _stop_session(session_key: int) -> None:
+        rec = active_recorders.pop(session_key, None)
+        meeting_id = active_meetings.pop(session_key, None)
+        if rec is None:
+            if captioner is not None:
+                captioner.clear(session_key)
+            return
+
         audio_path_final = rec.stop()
-        _clear_caption_for(pid)
+        if captioner is not None:
+            captioner.clear(session_key)
 
         if meeting_id is None:
             if audio_path_final:
-                print(f"Audio recording stopped ({reason}): {audio_path_final}")
+                print(f"Audio-only session saved to {audio_path_final}")
             return
 
         transcript_text = None
@@ -397,7 +452,7 @@ def recognize_face():
                         try:
                             cursor.execute(
                                 "SELECT COALESCE(name,'') FROM faces WHERE id = ?",
-                                (int(pid),),
+                                (int(session_key),),
                             )
                             rname = cursor.fetchone()
                             person_name = (rname[0] if rname else "") or None
@@ -408,7 +463,7 @@ def recognize_face():
                                 WHERE person_id = ? AND ended_at IS NOT NULL AND id < ? AND COALESCE(summary,'') != ''
                                 ORDER BY id DESC LIMIT 1
                                 """,
-                                (int(pid), int(meeting_id)),
+                                (int(session_key), int(meeting_id)),
                             )
                             rprev = cursor.fetchone()
                             prev_summary = (rprev[0] if rprev else "") or ""
@@ -437,62 +492,45 @@ def recognize_face():
             )
             conn.commit()
 
-    def _finalize_all_recorders(reason: str) -> None:
-        for pid in list(active_recorders.keys()):
-            _finalize_recorder(pid, reason)
+    def _clear_face_presence() -> None:
+        for pid in list(presence_state.keys()):
+            if pid != AUDIO_SESSION_KEY:
+                presence_state.pop(pid, None)
+        last_detected_ts.clear()
+        if hasattr(recognize_face, "_prev_summaries"):
+            recognize_face._prev_summaries.clear()  # type: ignore[attr-defined]
 
-    def _start_continuous_esp32_recording(mode_byte: int) -> None:
-        if not transcription_enabled or create_recorder is None:
-            return
-        if ESP32_CONTINUOUS_KEY in active_recorders:
-            return
+    def _apply_mode_transition(mode_byte: int) -> None:
+        if mode_byte == MODE_AUDIO:
+            for session_key in list(active_recorders.keys()):
+                _stop_session(session_key)
+            _clear_face_presence()
+            if transcription_enabled:
+                _start_session(AUDIO_SESSION_KEY, person_id=None, label_prefix="audio_only")
+                if AUDIO_SESSION_KEY in active_recorders:
+                    presence_state[AUDIO_SESSION_KEY] = 'present'
+        elif mode_byte == MODE_FACE:
+            for session_key in list(active_recorders.keys()):
+                _stop_session(session_key)
+            presence_state.clear()
+            last_detected_ts.clear()
+            if captioner is not None:
+                captioner.clear_all()
+        else:
+            if AUDIO_SESSION_KEY in active_recorders:
+                _stop_session(AUDIO_SESSION_KEY)
+            presence_state.pop(AUDIO_SESSION_KEY, None)
+            last_detected_ts.pop(AUDIO_SESSION_KEY, None)
+            if captioner is not None:
+                captioner.clear(AUDIO_SESSION_KEY)
 
-        rec = create_recorder(
-            audio_source=args.audio_source,
-            serial_port=args.serial_port,
-            serial_baud=args.serial_baud,
-        )
-        try:
-            audio_path = rec.start(RECORDINGS_DIR, f"esp32_{_mode_label(mode_byte).lower()}")
-        except Exception as _rec_err:
-            print(f"WARNING: Could not start continuous ESP32 recorder ({_rec_err}). "
-                  f"Transcription disabled. Use --no-audio to suppress this warning.")
-            return
-
-        active_recorders[ESP32_CONTINUOUS_KEY] = rec
-        print(f"ESP32 continuous recording started in {_mode_label(mode_byte)} mode: {audio_path}")
-
-    def _oled_show_person(name: str, seen_count: Optional[int], last_seen: Optional[str], rec: bool, prev_summary: Optional[str] = None):
-        if not _oled:
-            return
-        lines = [name or "Unknown"]
-        meta = []
-        if seen_count is not None:
-            meta.append(f"seen {seen_count}")
-        if last_seen:
-            meta.append(f"last {last_seen}")
-        if meta:
-            lines.append(" • ".join(meta))
-        if prev_summary:
-            lines.append(prev_summary)
-        if rec:
-            lines.append("REC")
-        _oled.update_text(lines)
-
-    def _oled_idle():
-        if not _oled:
-            return
-        _oled.update_text(["No one", datetime.now().strftime("%H:%M:%S")])
-
-    try:
-        if _oled:
-            _oled.update_text(["Ready", datetime.now().strftime("%H:%M:%S")])
-    except Exception:
-        pass
-
-    last_mode = current_mode[0]
+    applied_mode = None
 
     while True:
+        if applied_mode != current_mode[0]:
+            _apply_mode_transition(current_mode[0])
+            applied_mode = current_mode[0]
+
         ret, frame = cap.read()
         if not ret:
             break
@@ -523,30 +561,7 @@ def recognize_face():
         # Skip face detection only when the ESP32 is connected AND in AUDIO-only mode.
         # --no-mode-gate remains available as a Pi-side override that forces BOTH
         # behavior regardless of firmware mode packets.
-        _mode_gate_active = (_esp32_receiver is not None) and not getattr(args, 'no_mode_gate', False)
-        use_continuous_esp32_audio = _esp32_receiver is not None
-        mode_allows_audio = (not _mode_gate_active) or (current_mode[0] != MODE_FACE)
-
-        if current_mode[0] != last_mode:
-            old_label = _mode_label(last_mode)
-            new_label = _mode_label(current_mode[0])
-            print(f"Mode transition: {old_label} -> {new_label}")
-            _finalize_all_recorders(f"mode change {old_label}->{new_label}")
-            presence_state.clear()
-            last_detected_ts.clear()
-            _clear_all_captions()
-            try:
-                recognize_face._prev_summaries = {}  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            last_mode = current_mode[0]
-
-        if use_continuous_esp32_audio:
-            if transcription_enabled and mode_allows_audio:
-                _start_continuous_esp32_recording(current_mode[0])
-            elif not mode_allows_audio and ESP32_CONTINUOUS_KEY in active_recorders:
-                _finalize_recorder(ESP32_CONTINUOUS_KEY, f"entered {_mode_label(current_mode[0])} mode")
-
+        _mode_gate_active = (forced_mode is not None) or ((_esp32_receiver is not None) and not getattr(args, 'no_mode_gate', False))
         _skip_face = _mode_gate_active and (current_mode[0] == MODE_AUDIO)
         faces_info = [] if _skip_face else recog.detect_and_recognize(conn, frame)
         if not hasattr(recognize_face, "_prev_summaries"):
@@ -612,32 +627,12 @@ def recognize_face():
                         prev_summary=prev_summary,
                     )
                     mode_allows_recording = (not _mode_gate_active) or (current_mode[0] != MODE_FACE)
-                    if (transcription_enabled and not use_continuous_esp32_audio and
-                            recognized_id not in active_recorders and mode_allows_recording):
-                        if create_recorder:
-                            rec = create_recorder(
-                                audio_source=args.audio_source,
-                                serial_port=args.serial_port,
-                                serial_baud=args.serial_baud
-                            )
-                        else:
-                            rec = Recorder()
-                        try:
-                            audio_path_pending = rec.start(RECORDINGS_DIR, f"person{recognized_id}")
-                        except Exception as _rec_err:
-                            print(f"WARNING: Could not start audio recorder ({_rec_err}). "
-                                  f"Transcription disabled. Use --no-audio to suppress this warning.")
-                            transcription_enabled = False
-                            rec = None
-                        if rec is not None:
-                            cursor.execute(
-                                "INSERT INTO meetings (person_id, started_at, audio_path) VALUES (?, datetime('now'), ?)",
-                                (recognized_id, audio_path_pending),
-                            )
-                            meeting_id = cursor.lastrowid
-                            conn.commit()
-                            active_recorders[recognized_id] = rec
-                            active_meetings[recognized_id] = meeting_id
+                    if transcription_enabled and recognized_id not in active_recorders and mode_allows_recording:
+                        _start_session(
+                            int(recognized_id),
+                            person_id=int(recognized_id),
+                            label_prefix=f"person{recognized_id}",
+                        )
                 else:
                     presence_state[recognized_id] = 'present'
 
@@ -666,8 +661,7 @@ def recognize_face():
                     cv2.putText(display_frame, "REC", (x, y+45), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
         # Live transcription overlay (closed captioning)
-        if transcription_enabled and transcriber is not None and active_recorders:
-            captioner = _get_captioner()
+        if transcription_enabled and captioner is not None and active_recorders:
             captioner.update(active_recorders, active_meetings, cursor)
             caption = captioner.get_caption_for_present(presence_state)
             # Draw captions at bottom, wrap to fit
@@ -711,12 +705,14 @@ def recognize_face():
 
         now_ts = time.time()
         for pid, state in list(presence_state.items()):
+            if pid == AUDIO_SESSION_KEY:
+                continue
             if state == 'present' and pid not in recognized_ids_in_frame:
                 last_ts = last_detected_ts.get(pid)
                 if last_ts is not None and (now_ts - last_ts) > ABSENCE_GRACE_SEC:
                     presence_state[pid] = 'absent'
                     if pid in active_recorders:
-                        _finalize_recorder(pid, "face no longer present")
+                        _stop_session(pid)
                     if _oled and all(v == 'absent' for v in presence_state.values()):
                         _oled_idle()
 
@@ -729,8 +725,13 @@ def recognize_face():
             state_txt = 'ENABLED' if transcription_enabled else 'DISABLED'
             print(f"Transcription {state_txt}")
             if not transcription_enabled:
-                _finalize_all_recorders("transcription toggled off")
-                _clear_all_captions()
+                for session_key in list(active_recorders.keys()):
+                    _stop_session(session_key)
+                presence_state.pop(AUDIO_SESSION_KEY, None)
+                if captioner is not None:
+                    captioner.clear_all()
+            else:
+                applied_mode = None
 
     try:
         cap.release()

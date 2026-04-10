@@ -47,9 +47,9 @@ if [[ $USE_XVFB -eq 1 ]]; then
     echo "xvfb-run not found; install it: sudo apt install -y xvfb" >&2
     exit 1
   fi
-  EXEC_START=("$XVFB_BIN" -a "$MAKE_BIN" -C "$REPO_DIR" run-no-audio)
+  EXEC_START=("$XVFB_BIN" -a "$MAKE_BIN" -C "$REPO_DIR" run-face)
 else
-  EXEC_START=("$MAKE_BIN" -C "$REPO_DIR" run-no-audio)
+  EXEC_START=("$MAKE_BIN" -C "$REPO_DIR" run-face)
 fi
 
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
@@ -62,7 +62,7 @@ fi
 
 cat >"$SERVICE_PATH" <<EOF
 [Unit]
-Description=TrueVision (make run-no-audio)
+Description=TrueVision (make run-face)
 After=network-online.target
 Wants=network-online.target
 
