@@ -13,7 +13,7 @@ Extended bidirectional protocol (truevision_main.ino):
 
     ESP32 → Pi types:
         0x01  AUDIO_DATA   raw int16 PCM
-        0x02  MODE_CHANGE  1-byte: 0x00=AUDIO, 0x01=FACE
+        0x02  MODE_CHANGE  1-byte: 0x00=AUDIO, 0x01=FACE, 0x02=BOTH
         0x03  MARKER       0 bytes (Pi timestamps on receipt)
         0x04  DIAG_REQUEST 0 bytes
 
@@ -70,6 +70,7 @@ PI_STATUS_SUMMARIZER_TIMEOUT = 0x04
 # Operating modes (MODE_CHANGE payload values)
 MODE_AUDIO = 0x00
 MODE_FACE  = 0x01
+MODE_BOTH  = 0x02
 
 
 def probe_esp32_uart_stream(port: str = '/dev/serial0', baud_rate: int = 921600, timeout_sec: float = 1.0) -> bool:
@@ -143,7 +144,7 @@ class ESP32SerialAudioReceiver:
             oled_missing: When True, the receiver will push PI_STATUS packets
                 to the ESP32 whenever a non-OK status is set via send_pi_status().
                 If False, PI_STATUS is only sent in response to DIAG_REQUEST.
-            on_mode_change: Called with the new mode byte (MODE_AUDIO / MODE_FACE)
+            on_mode_change: Called with the new mode byte (MODE_AUDIO / MODE_FACE / MODE_BOTH)
                 when the ESP32 sends a PKT_MODE_CHANGE packet.
             on_marker: Called (no args) when the ESP32 sends PKT_MARKER.
             on_diag_request: Called (no args) when the ESP32 sends PKT_DIAG_REQUEST.

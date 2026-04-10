@@ -1,6 +1,12 @@
-# ESP32 I2S Microphone to UART Firmware
+# ESP32 TrueVision UART Firmware
 
-Arduino sketch for streaming audio from an I2S microphone to Raspberry Pi via UART.
+The main firmware is `truevision_main.ino`. It streams microphone audio to the Raspberry Pi via UART and also handles mode control, the user button, and optional debug LEDs.
+
+Other sketches in this folder are for isolated testing only:
+
+- `test_audio_generator.ino` simulates audio packets without a microphone
+- `uart0_pi_probe_test.ino` sends simple UART probe traffic
+- `i2s_uart_audio_streamer.ino` is the older single-purpose audio streamer
 
 ## Hardware Required
 
@@ -71,12 +77,43 @@ Connect ESP32 to Raspberry Pi:
 - **Tools → Partition Scheme:** Default 4MB with spiffs
 - **Tools → Port:** Select your ESP32's USB port (e.g., /dev/ttyUSB0)
 
-### 3. Upload the Sketch
+### 3. Select the firmware profile and upload the sketch
 
-1. Open `i2s_uart_audio_streamer.ino` in Arduino IDE
+1. Open `truevision_main.ino` in Arduino IDE
 2. Connect ESP32 to your computer via USB
 3. Click **Upload** button (or press Ctrl+U)
 4. Wait for compilation and upload to complete
+
+Before uploading, set the board profile near the top of the sketch:
+
+```cpp
+#define BOARD_PROFILE_TEST        1
+#define BOARD_PROFILE_PRODUCTION  2
+
+#ifndef BOARD_PROFILE
+#define BOARD_PROFILE BOARD_PROFILE_PRODUCTION
+#endif
+```
+
+Use these profiles:
+
+- `BOARD_PROFILE_TEST`: for the testing ESP32 that does not have the user button, mode switch, or debug LEDs connected
+- `BOARD_PROFILE_PRODUCTION`: for the production ESP32 with the user button, mode switch, and two debug LEDs
+
+Both profiles boot in `BOTH` mode.
+
+Behavior by profile:
+
+- Test profile:
+  - boots in `BOTH`
+  - no hardware mode/button interaction expected
+  - best paired with `make run-esp32` on the Pi
+- Production profile:
+  - boots in `BOTH`
+  - mode switch selects `AUDIO`-only or `FACE`-only
+  - single short press sends a marker
+  - double short press returns to `BOTH`
+  - long press requests diagnostics from the Pi
 
 **Troubleshooting Upload Issues:**
 - If upload fails, try holding the **BOOT** button during upload
@@ -102,20 +139,23 @@ audio_buffer[i] = (int16_t)(i2s_read_buffer[i] >> 14);
 
 **Monitor Serial Output:**
 ```bash
-# In Arduino IDE, open Serial Monitor (Tools → Serial Monitor)
-# Set baud rate to 921600
-# You should see:
-#   ESP32 I2S to UART Audio Streamer
-#   Initializing I2S...
-#   I2S initialized successfully
-#   Starting audio streaming to UART...
+# truevision_main.ino uses UART0 for binary packets.
+# Do not leave Serial Monitor attached while testing against the Pi.
+# If you open Serial Monitor at 921600, you should expect binary garbage,
+# not human-readable log messages.
 ```
 
 **Test Audio Streaming:**
 Once uploaded and connected to Raspberry Pi:
 ```bash
-# On Raspberry Pi, run:
-python main.py --audio-source esp32-serial --serial-port /dev/serial0 --serial-baud 921600
+# On Raspberry Pi, run from the repo root:
+make run-esp32
+```
+
+If you need the Pi to ignore firmware mode packets and force simultaneous face recognition + transcription, run:
+
+```bash
+make run-esp32-force-both
 ```
 
 ## Troubleshooting
@@ -137,6 +177,11 @@ python main.py --audio-source esp32-serial --serial-port /dev/serial0 --serial-b
 - Confirm GND is connected between ESP32 and Pi
 - Check that Pi UART is enabled (see main SETUP_PI.md)
 - Try lower baud rate (460800 or 115200) if 921600 is unstable
+
+### Mode / button behavior issues
+- If the testing board appears to react to missing controls, confirm you flashed `BOARD_PROFILE_TEST`
+- If production never changes modes, confirm the switch is wired to the pins used by `truevision_main.ino`
+- If you always want the Pi to run both subsystems regardless of firmware mode packets, use `make run-esp32-force-both`
 
 ### Garbled Serial Monitor Output
 - This is normal when streaming binary audio data

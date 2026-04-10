@@ -146,6 +146,7 @@ def recognize_face():
     active_recorders = {}
     active_meetings = {}
     live_captions = {}
+    ESP32_CONTINUOUS_KEY = -1
     Recorder = None
     create_recorder = None
     Transcriber = None
@@ -168,8 +169,8 @@ def recognize_face():
 
     # ── ESP32 mode switch and marker integration ──────────────────────────────
     # current_mode is a one-element list so the closures below can mutate it.
-    from audio_analysis.esp32_serial_audio import MODE_AUDIO, MODE_FACE
-    current_mode = [MODE_AUDIO]
+    from audio_analysis.esp32_serial_audio import MODE_AUDIO, MODE_FACE, MODE_BOTH
+    current_mode = [MODE_BOTH]
     # Thread-safe queue for marker events (PKT_MARKER from ESP32 button).
     # The main loop drains the queue and appends [MARKER HH:MM:SS] to the
     # active meeting transcript.
@@ -177,7 +178,12 @@ def recognize_face():
 
     def _on_mode_change(mode_byte: int) -> None:
         current_mode[0] = mode_byte
-        label = "FACE" if mode_byte == MODE_FACE else "AUDIO"
+        if mode_byte == MODE_FACE:
+            label = "FACE"
+        elif mode_byte == MODE_AUDIO:
+            label = "AUDIO"
+        else:
+            label = "BOTH"
         print(f"ESP32: Mode changed to {label}")
 
     def _on_marker() -> None:
@@ -241,6 +247,221 @@ def recognize_face():
             print(f"WARNING: Caption speaker init failed ({e}). Speech disabled.")
             speaker = None
 
+    def _mode_label(mode_byte: int) -> str:
+        if mode_byte == MODE_FACE:
+            return "FACE"
+        if mode_byte == MODE_AUDIO:
+            return "AUDIO"
+        return "BOTH"
+
+    def _get_captioner():
+        from audio_analysis.live_caption import LiveCaptioner, CaptionConfig
+
+        if not hasattr(recognize_face, "_captioner"):
+            recognize_face._captioner = LiveCaptioner(
+                transcriber,
+                CaptionConfig(interval_sec=args.caption_interval, max_words=args.caption_max_words),
+            )
+        return recognize_face._captioner  # type: ignore[attr-defined]
+
+    def _clear_caption_for(pid: int) -> None:
+        captioner = getattr(recognize_face, "_captioner", None)
+        if captioner is not None:
+            captioner.remove_caption(pid)
+
+    def _clear_all_captions() -> None:
+        captioner = getattr(recognize_face, "_captioner", None)
+        if captioner is not None:
+            captioner.clear()
+
+    def _finalize_recorder(pid: int, reason: str) -> None:
+        rec = active_recorders.pop(pid, None)
+        if rec is None:
+            return
+
+        meeting_id = active_meetings.pop(pid, None)
+        audio_path_final = rec.stop()
+        _clear_caption_for(pid)
+
+        if meeting_id is None:
+            if audio_path_final:
+                print(f"Audio recording stopped ({reason}): {audio_path_final}")
+            return
+
+        transcript_text = None
+        if audio_path_final and transcription_enabled and transcriber is not None:
+            try:
+                transcript_text = transcriber.transcribe(audio_path_final)
+            except Exception as e:
+                print(f"Transcription failed: {e}")
+                transcript_text = None
+
+        if transcript_text is None:
+            cursor.execute("SELECT COALESCE(transcript,'') FROM meetings WHERE id = ?", (meeting_id,))
+            (existing_transcript,) = cursor.fetchone() or ('',)
+            transcript_text = existing_transcript or ''
+
+        cursor.execute(
+            "UPDATE meetings SET ended_at = datetime('now'), transcript = ? WHERE id = ?",
+            (transcript_text, meeting_id),
+        )
+        conn.commit()
+
+        if getattr(args, 'summary_async', False):
+            import threading
+
+            def _bg_summarize(mid: int, db_path: str, text: str, max_sent: int, max_chars: int):
+                try:
+                    from data_access.db import open_db as _open_db
+                    from audio_analysis.transcription import summarize_one_sentence as _summ1
+                    from audio_analysis.transcription import summarize_text as _summ
+                    try:
+                        from summarization.remote_client import remote_summarize_one_sentence as _remote
+                    except Exception:
+                        _remote = None
+                    c2 = _open_db(db_path)
+                    cur2 = c2.cursor()
+
+                    summary = ""
+                    if _remote is not None:
+                        try:
+                            cur2.execute(
+                                "SELECT person_id FROM meetings WHERE id = ?",
+                                (int(mid),),
+                            )
+                            rpid = cur2.fetchone()
+                            person_id = int(rpid[0]) if rpid and rpid[0] is not None else None
+                            prev_summary = ""
+                            if person_id is not None:
+                                cur2.execute(
+                                    """
+                                    SELECT COALESCE(summary,'') FROM meetings
+                                    WHERE person_id = ? AND ended_at IS NOT NULL AND id < ? AND COALESCE(summary,'') != ''
+                                    ORDER BY id DESC LIMIT 1
+                                    """,
+                                    (int(person_id), int(mid)),
+                                )
+                                rprev = cur2.fetchone()
+                                prev_summary = (rprev[0] if rprev else "") or ""
+
+                            cur2.execute("SELECT COALESCE(name,'') FROM faces WHERE id = ?", (int(person_id),))
+                            rname = cur2.fetchone() if person_id is not None else None
+                            person_name = (rname[0] if rname else "") or None
+
+                            summary = _remote(
+                                transcript=text,
+                                previous_summary=prev_summary,
+                                person_name=person_name,
+                                max_chars=int(max_chars),
+                            )
+                        except Exception:
+                            summary = ""
+
+                    if not summary:
+                        if int(max_sent) <= 1:
+                            summary = _summ1(text, max_chars=int(max_chars))
+                        else:
+                            summary = _summ(text, max_sentences=int(max_sent))
+                    cur2.execute(
+                        "UPDATE meetings SET summary = ? WHERE id = ?",
+                        (summary, mid),
+                    )
+                    c2.commit()
+                    c2.close()
+                except Exception as _e:
+                    print(f"Background summary failed: {_e}")
+
+            t = threading.Thread(
+                target=_bg_summarize,
+                args=(
+                    meeting_id,
+                    DB_PATH_DEFAULT,
+                    transcript_text,
+                    int(getattr(args, 'summary_max_sentences', 1)),
+                    int(getattr(args, 'summary_max_chars', 140)),
+                ),
+            )
+            t.daemon = True
+            t.start()
+        else:
+            try:
+                from audio_analysis.transcription import summarize_one_sentence
+                try:
+                    from summarization.remote_client import remote_summarize_one_sentence
+                except Exception:
+                    remote_summarize_one_sentence = None  # type: ignore
+
+                if int(getattr(args, 'summary_max_sentences', 1)) <= 1:
+                    summary_text = ""
+                    if remote_summarize_one_sentence is not None:
+                        try:
+                            cursor.execute(
+                                "SELECT COALESCE(name,'') FROM faces WHERE id = ?",
+                                (int(pid),),
+                            )
+                            rname = cursor.fetchone()
+                            person_name = (rname[0] if rname else "") or None
+
+                            cursor.execute(
+                                """
+                                SELECT COALESCE(summary,'') FROM meetings
+                                WHERE person_id = ? AND ended_at IS NOT NULL AND id < ? AND COALESCE(summary,'') != ''
+                                ORDER BY id DESC LIMIT 1
+                                """,
+                                (int(pid), int(meeting_id)),
+                            )
+                            rprev = cursor.fetchone()
+                            prev_summary = (rprev[0] if rprev else "") or ""
+
+                            summary_text = remote_summarize_one_sentence(
+                                transcript=transcript_text,
+                                previous_summary=prev_summary,
+                                person_name=person_name,
+                                max_chars=int(getattr(args, 'summary_max_chars', 140)),
+                            )
+                        except Exception as e:
+                            print(f"Remote summarizer failed; falling back: {e}")
+                            summary_text = ""
+                    if not summary_text:
+                        summary_text = summarize_one_sentence(
+                            transcript_text,
+                            max_chars=int(getattr(args, 'summary_max_chars', 140)),
+                        )
+                else:
+                    summary_text = summarize_text(transcript_text, max_sentences=args.summary_max_sentences)
+            except Exception:
+                summary_text = summarize_text(transcript_text, max_sentences=args.summary_max_sentences)
+            cursor.execute(
+                "UPDATE meetings SET summary = ? WHERE id = ?",
+                (summary_text, meeting_id),
+            )
+            conn.commit()
+
+    def _finalize_all_recorders(reason: str) -> None:
+        for pid in list(active_recorders.keys()):
+            _finalize_recorder(pid, reason)
+
+    def _start_continuous_esp32_recording(mode_byte: int) -> None:
+        if not transcription_enabled or create_recorder is None:
+            return
+        if ESP32_CONTINUOUS_KEY in active_recorders:
+            return
+
+        rec = create_recorder(
+            audio_source=args.audio_source,
+            serial_port=args.serial_port,
+            serial_baud=args.serial_baud,
+        )
+        try:
+            audio_path = rec.start(RECORDINGS_DIR, f"esp32_{_mode_label(mode_byte).lower()}")
+        except Exception as _rec_err:
+            print(f"WARNING: Could not start continuous ESP32 recorder ({_rec_err}). "
+                  f"Transcription disabled. Use --no-audio to suppress this warning.")
+            return
+
+        active_recorders[ESP32_CONTINUOUS_KEY] = rec
+        print(f"ESP32 continuous recording started in {_mode_label(mode_byte)} mode: {audio_path}")
+
     def _oled_show_person(name: str, seen_count: Optional[int], last_seen: Optional[str], rec: bool, prev_summary: Optional[str] = None):
         if not _oled:
             return
@@ -268,6 +489,8 @@ def recognize_face():
             _oled.update_text(["Ready", datetime.now().strftime("%H:%M:%S")])
     except Exception:
         pass
+
+    last_mode = current_mode[0]
 
     while True:
         ret, frame = cap.read()
@@ -297,9 +520,33 @@ def recognize_face():
                 break
 
         recognized_ids_in_frame = set()
-        # Skip face detection only when the ESP32 is connected AND in AUDIO mode,
-        # unless --no-mode-gate is set (for testing without the hardware switch).
+        # Skip face detection only when the ESP32 is connected AND in AUDIO-only mode.
+        # --no-mode-gate remains available as a Pi-side override that forces BOTH
+        # behavior regardless of firmware mode packets.
         _mode_gate_active = (_esp32_receiver is not None) and not getattr(args, 'no_mode_gate', False)
+        use_continuous_esp32_audio = _esp32_receiver is not None
+        mode_allows_audio = (not _mode_gate_active) or (current_mode[0] != MODE_FACE)
+
+        if current_mode[0] != last_mode:
+            old_label = _mode_label(last_mode)
+            new_label = _mode_label(current_mode[0])
+            print(f"Mode transition: {old_label} -> {new_label}")
+            _finalize_all_recorders(f"mode change {old_label}->{new_label}")
+            presence_state.clear()
+            last_detected_ts.clear()
+            _clear_all_captions()
+            try:
+                recognize_face._prev_summaries = {}  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            last_mode = current_mode[0]
+
+        if use_continuous_esp32_audio:
+            if transcription_enabled and mode_allows_audio:
+                _start_continuous_esp32_recording(current_mode[0])
+            elif not mode_allows_audio and ESP32_CONTINUOUS_KEY in active_recorders:
+                _finalize_recorder(ESP32_CONTINUOUS_KEY, f"entered {_mode_label(current_mode[0])} mode")
+
         _skip_face = _mode_gate_active and (current_mode[0] == MODE_AUDIO)
         faces_info = [] if _skip_face else recog.detect_and_recognize(conn, frame)
         if not hasattr(recognize_face, "_prev_summaries"):
@@ -365,7 +612,8 @@ def recognize_face():
                         prev_summary=prev_summary,
                     )
                     mode_allows_recording = (not _mode_gate_active) or (current_mode[0] != MODE_FACE)
-                    if transcription_enabled and recognized_id not in active_recorders and mode_allows_recording:
+                    if (transcription_enabled and not use_continuous_esp32_audio and
+                            recognized_id not in active_recorders and mode_allows_recording):
                         if create_recorder:
                             rec = create_recorder(
                                 audio_source=args.audio_source,
@@ -419,11 +667,7 @@ def recognize_face():
 
         # Live transcription overlay (closed captioning)
         if transcription_enabled and transcriber is not None and active_recorders:
-            from audio_analysis.live_caption import LiveCaptioner, CaptionConfig
-            # Initialize once and cache on function attribute
-            if not hasattr(recognize_face, "_captioner"):
-                recognize_face._captioner = LiveCaptioner(transcriber, CaptionConfig(interval_sec=args.caption_interval, max_words=args.caption_max_words))
-            captioner = recognize_face._captioner  # type: ignore[attr-defined]
+            captioner = _get_captioner()
             captioner.update(active_recorders, active_meetings, cursor)
             caption = captioner.get_caption_for_present(presence_state)
             # Draw captions at bottom, wrap to fit
@@ -472,168 +716,7 @@ def recognize_face():
                 if last_ts is not None and (now_ts - last_ts) > ABSENCE_GRACE_SEC:
                     presence_state[pid] = 'absent'
                     if pid in active_recorders:
-                        rec = active_recorders.pop(pid)
-                        meeting_id = active_meetings.pop(pid, None)
-                        audio_path_final = rec.stop()
-                        if meeting_id is not None:
-                            # Compute transcript synchronously (if possible) so text appears quickly
-                            transcript_text = None
-                            if audio_path_final and transcription_enabled and transcriber is not None:
-                                try:
-                                    transcript_text = transcriber.transcribe(audio_path_final)
-                                except Exception as e:
-                                    print(f"Transcription failed: {e}")
-                                    transcript_text = None
-
-                            # Fallback to existing incremental transcript
-                            if transcript_text is None:
-                                cursor.execute("SELECT COALESCE(transcript,'') FROM meetings WHERE id = ?", (meeting_id,))
-                                (existing_transcript,) = cursor.fetchone() or ('',)
-                                transcript_text = existing_transcript or ''
-
-                            # Always set ended_at and transcript now
-                            cursor.execute(
-                                "UPDATE meetings SET ended_at = datetime('now'), transcript = ? WHERE id = ?",
-                                (transcript_text, meeting_id),
-                            )
-                            conn.commit()
-
-                            # Summary: async if requested, else synchronous
-                            if getattr(args, 'summary_async', False):
-                                import threading
-
-                                def _bg_summarize(mid: int, db_path: str, text: str, max_sent: int, max_chars: int):
-                                    try:
-                                        from data_access.db import open_db as _open_db
-                                        from audio_analysis.transcription import summarize_one_sentence as _summ1
-                                        from audio_analysis.transcription import summarize_text as _summ
-                                        # Optional remote summarizer (off-device)
-                                        try:
-                                            from summarization.remote_client import remote_summarize_one_sentence as _remote
-                                        except Exception:
-                                            _remote = None
-                                        c2 = _open_db(db_path)
-                                        cur2 = c2.cursor()
-
-                                        summary = ""
-                                        # Prefer remote summarizer if configured.
-                                        if _remote is not None:
-                                            try:
-                                                # Try to pass previous summary context for coherence.
-                                                cur2.execute(
-                                                    "SELECT person_id FROM meetings WHERE id = ?",
-                                                    (int(mid),),
-                                                )
-                                                rpid = cur2.fetchone()
-                                                person_id = int(rpid[0]) if rpid and rpid[0] is not None else None
-                                                prev_summary = ""
-                                                if person_id is not None:
-                                                    cur2.execute(
-                                                        """
-                                                        SELECT COALESCE(summary,'') FROM meetings
-                                                        WHERE person_id = ? AND ended_at IS NOT NULL AND id < ? AND COALESCE(summary,'') != ''
-                                                        ORDER BY id DESC LIMIT 1
-                                                        """,
-                                                        (int(person_id), int(mid)),
-                                                    )
-                                                    rprev = cur2.fetchone()
-                                                    prev_summary = (rprev[0] if rprev else "") or ""
-
-                                                cur2.execute("SELECT COALESCE(name,'') FROM faces WHERE id = ?", (int(person_id),))
-                                                rname = cur2.fetchone() if person_id is not None else None
-                                                person_name = (rname[0] if rname else "") or None
-
-                                                summary = _remote(
-                                                    transcript=text,
-                                                    previous_summary=prev_summary,
-                                                    person_name=person_name,
-                                                    max_chars=int(max_chars),
-                                                )
-                                            except Exception:
-                                                summary = ""
-
-                                        if not summary:
-                                            if int(max_sent) <= 1:
-                                                summary = _summ1(text, max_chars=int(max_chars))
-                                            else:
-                                                summary = _summ(text, max_sentences=int(max_sent))
-                                        cur2.execute(
-                                            "UPDATE meetings SET summary = ? WHERE id = ?",
-                                            (summary, mid),
-                                        )
-                                        c2.commit()
-                                        c2.close()
-                                    except Exception as _e:
-                                        print(f"Background summary failed: {_e}")
-
-                                t = threading.Thread(
-                                    target=_bg_summarize,
-                                    args=(
-                                        meeting_id,
-                                        DB_PATH_DEFAULT,
-                                        transcript_text,
-                                        int(getattr(args, 'summary_max_sentences', 1)),
-                                        int(getattr(args, 'summary_max_chars', 140)),
-                                    ),
-                                ),
-                                # unpack tuple accidental trailing comma avoidance
-                                t = t[0]
-                                t.daemon = True
-                                t.start()
-                            else:
-                                try:
-                                    from audio_analysis.transcription import summarize_one_sentence
-                                    try:
-                                        from summarization.remote_client import remote_summarize_one_sentence
-                                    except Exception:
-                                        remote_summarize_one_sentence = None  # type: ignore
-
-                                    if int(getattr(args, 'summary_max_sentences', 1)) <= 1:
-                                        summary_text = ""
-                                        if remote_summarize_one_sentence is not None:
-                                            try:
-                                                # Provide previous summary and person name if available.
-                                                cursor.execute(
-                                                    "SELECT COALESCE(name,'') FROM faces WHERE id = ?",
-                                                    (int(pid),),
-                                                )
-                                                rname = cursor.fetchone()
-                                                person_name = (rname[0] if rname else "") or None
-
-                                                cursor.execute(
-                                                    """
-                                                    SELECT COALESCE(summary,'') FROM meetings
-                                                    WHERE person_id = ? AND ended_at IS NOT NULL AND id < ? AND COALESCE(summary,'') != ''
-                                                    ORDER BY id DESC LIMIT 1
-                                                    """,
-                                                    (int(pid), int(meeting_id)),
-                                                )
-                                                rprev = cursor.fetchone()
-                                                prev_summary = (rprev[0] if rprev else "") or ""
-
-                                                summary_text = remote_summarize_one_sentence(
-                                                    transcript=transcript_text,
-                                                    previous_summary=prev_summary,
-                                                    person_name=person_name,
-                                                    max_chars=int(getattr(args, 'summary_max_chars', 140)),
-                                                )
-                                            except Exception as e:
-                                                print(f"Remote summarizer failed; falling back: {e}")
-                                                summary_text = ""
-                                        if not summary_text:
-                                            summary_text = summarize_one_sentence(
-                                                transcript_text,
-                                                max_chars=int(getattr(args, 'summary_max_chars', 140)),
-                                            )
-                                    else:
-                                        summary_text = summarize_text(transcript_text, max_sentences=args.summary_max_sentences)
-                                except Exception:
-                                    summary_text = summarize_text(transcript_text, max_sentences=args.summary_max_sentences)
-                                cursor.execute(
-                                    "UPDATE meetings SET summary = ? WHERE id = ?",
-                                    (summary_text, meeting_id),
-                                )
-                                conn.commit()
+                        _finalize_recorder(pid, "face no longer present")
                     if _oled and all(v == 'absent' for v in presence_state.values()):
                         _oled_idle()
 
@@ -646,10 +729,8 @@ def recognize_face():
             state_txt = 'ENABLED' if transcription_enabled else 'DISABLED'
             print(f"Transcription {state_txt}")
             if not transcription_enabled:
-                for pid, rec in list(active_recorders.items()):
-                    rec.stop()
-                active_recorders.clear()
-                active_meetings.clear()
+                _finalize_all_recorders("transcription toggled off")
+                _clear_all_captions()
 
     try:
         cap.release()

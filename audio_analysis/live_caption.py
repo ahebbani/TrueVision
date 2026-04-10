@@ -69,3 +69,11 @@ class LiveCaptioner:
         if self._captions:
             return next(iter(self._captions.values()))
         return None
+
+    def remove_caption(self, pid: int) -> None:
+        self._last_update.pop(pid, None)
+        self._captions.pop(pid, None)
+
+    def clear(self) -> None:
+        self._last_update.clear()
+        self._captions.clear()

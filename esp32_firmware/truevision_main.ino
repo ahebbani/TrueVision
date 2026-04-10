@@ -3,8 +3,8 @@
  *
  * Handles:
  *   - I2S microphone capture + streaming to Raspberry Pi via UART
- *   - Mode switch (GPIO 35 / 36): AUDIO-only vs FACE-only
- *   - Meeting-marker push button (GPIO 11)
+ *   - Mode switch: test board uses GPIO 22 / 23, production board uses its board-defined pins
+ *   - Meeting-marker / BOTH-override push button (GPIO 11)
  *   - Dual debug LEDs (GPIO 9 / 10) with diagnostic patterns
  *   - Bidirectional UART control protocol with Raspberry Pi
  *
@@ -34,7 +34,7 @@
  *
  *   ESP32 → Pi types:
  *     0x01  AUDIO_DATA   raw int16 PCM at 16 kHz mono
- *     0x02  MODE_CHANGE  1-byte payload: 0x00=AUDIO  0x01=FACE
+ *     0x02  MODE_CHANGE  1-byte payload: 0x00=AUDIO  0x01=FACE  0x02=BOTH
  *     0x03  MARKER       0-byte payload (Pi timestamps on receipt)
  *     0x04  DIAG_REQUEST 0-byte payload (request Pi status report)
  *
@@ -70,13 +70,14 @@
  *   Both LEDs alternating 4 Hz   I2S init failed AND Pi critical error
  *
  * ── Button (GPIO 11) ───────────────────────────────────────────────────────
- *   Short press (< 3 s)  Send MARKER packet → Pi inserts [MARKER HH:MM:SS]
+ *   Single short press   Send MARKER packet → Pi inserts [MARKER HH:MM:SS]
  *                        into the active meeting transcript
+ *   Double short press   Force BOTH mode (audio + face together)
  *   Long press  (≥ 3 s)  Send DIAG_REQUEST → Pi replies with PI_STATUS even
  *                        if its OLED is up; both LEDs flash 3× alternately
  *                        to confirm receipt of ACK
  *
- * Author: TrueVision Project
+ * Author: Aditya Hebbani
  * Date:   January 2026
  */
 
@@ -91,8 +92,6 @@
 #define LED_AUDIO_PIN   9    // LED1: audio / hardware health
 #define LED_LINK_PIN    10   // LED2: link / Pi health
 #define BUTTON_PIN      11   // Push button, active-low (INPUT_PULLUP)
-#define MODE_PIN_A      35   // Mode switch leg A (input-only; PCB supplies pull)
-#define MODE_PIN_B      36   // Mode switch leg B (input-only; PCB supplies pull)
 
 // I2S microphone
 #define I2S_SCK_PIN     16   // BCLK
@@ -117,12 +116,37 @@
 // Serial0 always maps to UART0 hardware pins.
 static HardwareSerial &UART0 = Serial0;
 
-// ─── Test / Production Feature Flags ────────────────────────────────────────
-// Default these to 0 for the current bring-up setup: bare ESP32 + mic + UART.
-// Set them to 1 on the production PCB once the external switch/button/LEDs are wired.
+// ─── Board Profile Selection ────────────────────────────────────────────────
+// Keep one sketch source for both boards. Change BOARD_PROFILE (or override it
+// via a compile flag) before flashing.
+#define BOARD_PROFILE_TEST        1
+#define BOARD_PROFILE_PRODUCTION  2
+
+// Active default when no external compile flag overrides BOARD_PROFILE.
+// Change this line before flashing if you want the test-board profile.
+#ifndef BOARD_PROFILE
+#define BOARD_PROFILE BOARD_PROFILE_TEST
+#endif
+
+#if BOARD_PROFILE == BOARD_PROFILE_TEST
 #define ENABLE_STATUS_LEDS    0
 #define ENABLE_MARKER_BUTTON  0
-#define ENABLE_MODE_SWITCH    0
+#define ENABLE_MODE_SWITCH    1
+#define MODE_PIN_A            22   // Test-board switch leg A (uses internal pull-up)
+#define MODE_PIN_B            23   // Test-board switch leg B (uses internal pull-up)
+#define MODE_PIN_MODE         INPUT_PULLUP
+#elif BOARD_PROFILE == BOARD_PROFILE_PRODUCTION
+// The production hardware described for this project has one user button, a
+// mode switch, and two programmable debug LEDs.
+#define ENABLE_STATUS_LEDS    1
+#define ENABLE_MARKER_BUTTON  1
+#define ENABLE_MODE_SWITCH    1
+#define MODE_PIN_A            35   // Production switch leg A
+#define MODE_PIN_B            36   // Production switch leg B
+#define MODE_PIN_MODE         INPUT
+#else
+#error "Unsupported BOARD_PROFILE"
+#endif
 
 // ─── Protocol ────────────────────────────────────────────────────────────────
 #define SYNC_BYTE_1       0xAA
@@ -140,12 +164,14 @@ static HardwareSerial &UART0 = Serial0;
 // ─── Operating Modes ─────────────────────────────────────────────────────────
 #define MODE_AUDIO  0x00   // Stream audio; Pi skips face recognition
 #define MODE_FACE   0x01   // Pi runs face recognition; no audio stream sent
+#define MODE_BOTH   0x02   // Stream audio and allow face recognition together
 
 // ─── Timing ──────────────────────────────────────────────────────────────────
 #define HEARTBEAT_TIMEOUT_MS   8000   // LED2 slow-blink after this long without Pi heartbeat
 #define ZERO_SAMPLE_MS         2000   // LED1 solid after this long of all-zero samples
 #define SUPERVISOR_TICK_MS     50     // Supervisor polling interval
 #define BUTTON_DEBOUNCE_MS     50     // Hardware debounce window
+#define BUTTON_DOUBLE_PRESS_MS 600    // Max gap between short presses for BOTH mode
 #define BUTTON_LONG_PRESS_MS   3000   // Threshold for long press
 #define UART_TX_LOW_WATER      128    // bytes; below this = TX overflow risk
 
@@ -159,8 +185,8 @@ static uint8_t  s_audio_pkt[BUFFER_SIZE * 2 + 6];
 static SemaphoreHandle_t s_uart_tx_mutex;  // protects all UART writes
 
 // ─── Shared State (written by single owner task; read by others) ──────────────
-static volatile uint8_t  s_mode             = MODE_AUDIO;
-static volatile uint8_t  s_last_valid_mode  = MODE_AUDIO;
+static volatile uint8_t  s_mode             = MODE_BOTH;
+static volatile uint8_t  s_last_valid_mode  = MODE_BOTH;
 static volatile bool     s_mode_invalid     = false;
 static volatile uint32_t s_hb_last_ms       = 0;    // millis() of last heartbeat from Pi
 static volatile bool     s_pi_critical      = false; // Pi sent non-zero PI_STATUS
@@ -238,6 +264,13 @@ static void send_control_packet(uint8_t type, const uint8_t *data, uint16_t data
     xSemaphoreTake(s_uart_tx_mutex, portMAX_DELAY);
     UART0.write(buf, pkt_len);
     xSemaphoreGive(s_uart_tx_mutex);
+}
+
+static void set_mode(uint8_t new_mode) {
+    if (new_mode == s_mode) return;
+    s_mode = new_mode;
+    uint8_t payload = new_mode;
+    send_control_packet(PKT_MODE_CHANGE, &payload, 1);
 }
 
 // ─── LED State Machine (called from Supervisor every tick) ───────────────────
@@ -478,6 +511,12 @@ static void task_supervisor(void *) {
     uint32_t btn_chg_ms    = 0;     // millis() of last stable transition
     uint32_t btn_press_ms  = 0;     // millis() when press began
     bool     btn_long_done = false; // long-press payload already sent this press
+    bool     btn_short_pending = false;
+    uint32_t btn_short_ms      = 0;
+
+    bool     sw_have_valid_pos = false;
+    bool     sw_last_a         = false;
+    bool     sw_last_b         = false;
 
     uint32_t last_tick = millis();
 
@@ -529,16 +568,24 @@ static void task_supervisor(void *) {
         }
 
         s_mode_invalid = new_invalid;
-        if (!new_invalid && new_mode != s_mode) {
-            s_mode           = new_mode;
-            s_last_valid_mode = new_mode;
-            uint8_t payload   = new_mode;
-            send_control_packet(PKT_MODE_CHANGE, &payload, 1);
+        if (!new_invalid) {
+            if (!sw_have_valid_pos) {
+                sw_have_valid_pos = true;
+                sw_last_a = pin_a;
+                sw_last_b = pin_b;
+                s_last_valid_mode = new_mode;
+                set_mode(new_mode);
+            } else if (pin_a != sw_last_a || pin_b != sw_last_b) {
+                sw_last_a = pin_a;
+                sw_last_b = pin_b;
+                s_last_valid_mode = new_mode;
+                set_mode(new_mode);
+            }
         }
 #else
         s_mode_invalid    = false;
-        s_mode            = MODE_AUDIO;
-        s_last_valid_mode = MODE_AUDIO;
+        s_mode            = MODE_BOTH;
+        s_last_valid_mode = MODE_BOTH;
 #endif
 
         // ── Button Debounce ──────────────────────────────────────────────────
@@ -556,8 +603,13 @@ static void task_supervisor(void *) {
                     // Rising edge — button released
                     uint32_t held = now - btn_press_ms;
                     if (!btn_long_done && held >= BUTTON_DEBOUNCE_MS) {
-                        // Short press: send meeting marker
-                        send_control_packet(PKT_MARKER, nullptr, 0);
+                        if (btn_short_pending && (now - btn_short_ms) <= BUTTON_DOUBLE_PRESS_MS) {
+                            btn_short_pending = false;
+                            set_mode(MODE_BOTH);
+                        } else {
+                            btn_short_pending = true;
+                            btn_short_ms = now;
+                        }
                     }
                 }
             }
@@ -565,10 +617,19 @@ static void task_supervisor(void *) {
             btn_chg_ms = now;
         }
 
+        if (btn_short_pending && (now - btn_short_ms) > BUTTON_DOUBLE_PRESS_MS) {
+            btn_short_pending = false;
+            send_control_packet(PKT_MARKER, nullptr, 0);
+        }
+
         // Long-press: fire once while held ≥ threshold
         if (!btn_stable && !btn_long_done &&
             (now - btn_press_ms) >= BUTTON_LONG_PRESS_MS) {
             btn_long_done = true;
+            if (btn_short_pending) {
+                btn_short_pending = false;
+                send_control_packet(PKT_MARKER, nullptr, 0);
+            }
             send_control_packet(PKT_DIAG_REQUEST, nullptr, 0);
         }
 #endif
@@ -621,10 +682,11 @@ void setup() {
 #if ENABLE_MARKER_BUTTON
     pinMode(BUTTON_PIN,    INPUT_PULLUP);
 #endif
-    // GPIO 35/36 are input-only on classic ESP32; PCB provides pull resistors.
+    // Test profile uses internal pull-ups on GPIO 22/23. Production keeps its
+    // board-defined switch pins and external pull network.
 #if ENABLE_MODE_SWITCH
-    pinMode(MODE_PIN_A, INPUT);
-    pinMode(MODE_PIN_B, INPUT);
+    pinMode(MODE_PIN_A, MODE_PIN_MODE);
+    pinMode(MODE_PIN_B, MODE_PIN_MODE);
 #endif
     set_audio_led(false);
     set_link_led(false);
@@ -655,19 +717,15 @@ void setup() {
 #if ENABLE_MODE_SWITCH
     bool pa = (digitalRead(MODE_PIN_A) == HIGH);
     bool pb = (digitalRead(MODE_PIN_B) == HIGH);
-    if (pa && !pb) {
-        s_mode = s_last_valid_mode = MODE_AUDIO;
-    } else if (!pa && pb) {
-        s_mode = s_last_valid_mode = MODE_FACE;
-    } else {
-        s_mode_invalid     = true;
-        s_mode             = MODE_AUDIO;  // safe default
-        s_last_valid_mode  = MODE_AUDIO;
-    }
+    (void)pa;
+    (void)pb;
+    s_mode_invalid     = false;
+    s_mode             = MODE_BOTH;
+    s_last_valid_mode  = MODE_BOTH;
 #else
     s_mode_invalid     = false;
-    s_mode             = MODE_AUDIO;
-    s_last_valid_mode  = MODE_AUDIO;
+    s_mode             = MODE_BOTH;
+    s_last_valid_mode  = MODE_BOTH;
 #endif
 
     // Seed heartbeat timer (avoid spurious timeout immediately on boot)

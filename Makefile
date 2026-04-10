@@ -1,4 +1,4 @@
-.PHONY: help run run-no-audio run-overlay-no-audio models venv run-summarizer summarizer-setup summarizer-run db db-report
+.PHONY: help run run-esp32 run-esp32-force-both run-no-audio run-overlay-no-audio models fetch-models venv run-speak run-summarizer summarizer-setup summarizer-run db db-report
 
 # DB report defaults
 DB_REPORT_LIMIT ?= 100
@@ -20,7 +20,8 @@ endif
 help:
 	@echo "Targets:"
 	@echo "  run                 - Run full system (video + audio)"
-	@echo "  run-esp32           - Run with ESP32 UART audio + face recognition simultaneously (no mode gate)"
+	@echo "  run-esp32           - Run with ESP32 UART audio; firmware mode packets are honored"
+	@echo "  run-esp32-force-both - Ignore firmware mode packets and force audio + face together"
 	@echo "  run-no-audio        - Run video only (disable audio/transcription)"
 	@echo "  run-overlay-no-audio- Run overlay-only video with no audio (lighter)"
 	@echo "  run-speak           - Run full system with spoken captions (TTS)"
@@ -28,12 +29,16 @@ help:
 	@echo "  summarizer-setup    - Install summarizer service deps (FastAPI/uvicorn/requests)"
 	@echo "  summarizer-run      - Alias for run-summarizer"
 	@echo "  db-report           - Generate HTML DB report under docs/ (limit via DB_REPORT_LIMIT=...)"
-	@echo "  models              - Fetch facial recognition models"
+	@echo "  fetch-models        - Fetch facial recognition models"
+	@echo "  models              - Alias for fetch-models"
 
 run:
 	$(PY) main.py
 
 run-esp32:
+	$(PY) main.py --audio-source esp32-serial --serial-baud 921600
+
+run-esp32-force-both:
 	$(PY) main.py --audio-source esp32-serial --no-mode-gate --serial-baud 921600
 
 run-speak:
@@ -45,16 +50,16 @@ run-no-audio:
 run-overlay-no-audio:
 	$(PY) main.py --no-audio --overlay-only
 
-models:
+fetch-models:
 	$(PY) facial_recognition/models/fetch_models.py
+
+models: fetch-models
 
 run-summarizer:
 	$(PY) -m summarization.server
 
 db:
 	$(PY) data_access/visualize_db.py --html --limit $(DB_REPORT_LIMIT)
-
-db-report: db
 
 summarizer-setup:
 	$(PY) -m pip install -r requirements-summarization-service.txt
