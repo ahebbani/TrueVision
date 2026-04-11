@@ -14,6 +14,9 @@ import os
 import argparse
 import platform
 import queue
+import signal
+import subprocess
+import sys
 import time
 from datetime import datetime
 from typing import Optional
@@ -40,18 +43,34 @@ os.makedirs(RECORDINGS_DIR, exist_ok=True)
 
 OVERLAY_ONLY_DEFAULT = False  # Draw overlays on black background
 
-# Database connection
-conn = open_db()
-cursor = conn.cursor()
 
-# Optional OLED
-try:
-    from oled_output.oled_display import get_display, _DummyDisplay
-    _oled = get_display()
-    _oled_missing = isinstance(_oled, _DummyDisplay)
-except Exception:
-    _oled = None
-    _oled_missing = True
+def _log_system_diagnostics():
+    """Log hardware/OS diagnostics at startup for debugging shutdown issues."""
+    print(f"[DIAG] Platform: {platform.system()} {platform.machine()}")
+    print(f"[DIAG] Python: {sys.version}")
+    if platform.system() == 'Linux':
+        try:
+            model = open('/proc/device-tree/model').read().strip('\x00\n')
+            print(f"[DIAG] Board: {model}")
+        except Exception:
+            pass
+        # Check GPU throttle state (Raspberry Pi specific)
+        try:
+            result = subprocess.run(
+                ['vcgencmd', 'get_throttled'], capture_output=True, text=True, timeout=5
+            )
+            print(f"[DIAG] Throttle: {result.stdout.strip()}")
+        except Exception:
+            pass
+        # Log CMA pool size (relevant for Pi Camera + GPU memory issues)
+        try:
+            with open('/proc/meminfo') as f:
+                for line in f:
+                    if 'CmaTotal' in line or 'CmaFree' in line:
+                        print(f"[DIAG] {line.strip()}")
+        except Exception:
+            pass
+
 
 def parse_args():
     p = argparse.ArgumentParser(description="TrueVision runtime")
@@ -118,6 +137,22 @@ def parse_args():
 
 def recognize_face():
     args = parse_args()
+
+    _log_system_diagnostics()
+
+    # Database connection (deferred from module level to avoid I/O before arg parsing)
+    conn = open_db()
+    cursor = conn.cursor()
+
+    # Optional OLED (deferred — I2C init can block on Pi if bus is hung)
+    try:
+        from oled_output.oled_display import get_display, _DummyDisplay
+        _oled = get_display()
+        _oled_missing = isinstance(_oled, _DummyDisplay)
+    except Exception:
+        _oled = None
+        _oled_missing = True
+
     cap = open_camera(args.camera_backend, args.camera_index, args.camera_width, args.camera_height, args.camera_fps)
     if cap is None:
         print("ERROR: Could not open any camera. On Raspberry Pi, ensure libcamera works (try: libcamera-hello).\n"
@@ -751,4 +786,14 @@ def recognize_face():
 
 
 if __name__ == "__main__":
-    recognize_face()
+    # Graceful shutdown on SIGTERM (e.g. systemd stop)
+    signal.signal(signal.SIGTERM, lambda sig, frame: sys.exit(0))
+    try:
+        recognize_face()
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+    except Exception as exc:
+        print(f"[FATAL] Unhandled exception: {exc}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)

@@ -1,4 +1,4 @@
-.PHONY: help run run-audio run-face run-esp32 run-esp32-force-both run-overlay-no-audio models fetch-models venv run-speak run-summarizer summarizer-setup summarizer-run db db-report
+.PHONY: help run run-audio run-face run-esp32 run-esp32-force-both run-overlay-no-audio models fetch-models venv run-speak run-summarizer summarizer-setup summarizer-run db db-report setup-mac
 
 # DB report defaults
 DB_REPORT_LIMIT ?= 100
@@ -32,6 +32,7 @@ help:
 	@echo "  db-report           - Generate HTML DB report under docs/ (limit via DB_REPORT_LIMIT=...)"
 	@echo "  fetch-models        - Fetch facial recognition models"
 	@echo "  models              - Alias for fetch-models"
+	@echo "  setup-mac           - Run macOS development setup script"
 
 run:
 	$(PY) main.py
@@ -66,4 +67,7 @@ db:
 	$(PY) data_access/visualize_db.py --html --limit $(DB_REPORT_LIMIT)
 
 summarizer-setup:
-	$(PY) -m pip install -r requirements-summarization-service.txt
+	$(PY) -m pip install fastapi uvicorn requests
+
+setup-mac:
+	bash setup_mac.sh

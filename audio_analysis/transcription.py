@@ -14,11 +14,6 @@ try:
 except Exception:  # pragma: no cover
     sf = None  # type: ignore
 
-try:
-    import sounddevice as sd
-except Exception:  # pragma: no cover
-    sd = None  # type: ignore
-
 # Transcription model is optional import to allow running without it
 try:
     from faster_whisper import WhisperModel
@@ -214,6 +209,13 @@ def create_recorder(audio_source: str = "sounddevice", serial_port: str = "/dev/
             raise RuntimeError(
                 "ESP32 serial audio not available. Install pyserial: pip install pyserial"
             )
+
+        # Verify ESP32 is actually transmitting before committing to serial audio.
+        if probe_esp32_uart_stream is not None:
+            if not probe_esp32_uart_stream(port=serial_port, baud_rate=serial_baud, timeout_sec=2.0):
+                print(f"ESP32 Serial Audio: WARNING — no ESP32 stream detected on {serial_port}. "
+                      f"Falling back to local microphone.")
+                return Recorder(sample_rate=sample_rate, channels=channels)
         
         # Reuse a single shared serial receiver per (port, baud). UART is a single stream.
         key = (serial_port, int(serial_baud))
@@ -238,7 +240,8 @@ def create_recorder(audio_source: str = "sounddevice", serial_port: str = "/dev/
             channels=channels
         )
         
-        print(f"ESP32 Serial Audio: Recorder ready on {serial_port} at {serial_baud} baud")
+        print(f"ESP32 Serial Audio: Recorder ready on {serial_port} at {serial_baud} baud "
+              f"(ESP32 stream verified)")
         return recorder
     
     else:  # Default to sounddevice

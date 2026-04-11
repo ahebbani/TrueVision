@@ -193,9 +193,29 @@ class ESP32SerialAudioReceiver:
                 stopbits=serial.STOPBITS_ONE,
                 timeout=1.0  # 1 second read timeout
             )
-            print(f"ESP32 Serial Audio: Connected to {self.port} at {self.baud_rate} baud")
         except Exception as e:
             raise RuntimeError(f"Failed to open serial port {self.port}: {e}")
+
+        # Quick check for ESP32 sync bytes before declaring connection.
+        sync = bytes([self.SYNC_BYTE_1, self.SYNC_BYTE_2])
+        _probe_buf = bytearray()
+        _probe_deadline = time.time() + 2.0
+        _esp32_detected = False
+        while time.time() < _probe_deadline:
+            chunk = self._serial.read(4096)
+            if chunk:
+                _probe_buf.extend(chunk)
+                if sync in _probe_buf:
+                    _esp32_detected = True
+                    break
+                if len(_probe_buf) > 8192:
+                    _probe_buf = _probe_buf[-2048:]
+        if _esp32_detected:
+            print(f"ESP32 Serial Audio: Connected to {self.port} at {self.baud_rate} baud "
+                  f"(sync detected)")
+        else:
+            print(f"ESP32 Serial Audio: WARNING — port {self.port} opened but no ESP32 sync "
+                  f"bytes detected. The ESP32 may not be connected or transmitting.")
         
         self._stop_event.clear()
         self._running = True
