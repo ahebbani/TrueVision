@@ -34,6 +34,7 @@ help:
 	@echo "  models              - Alias for fetch-models"
 	@echo "  setup-mac           - Run macOS development setup script"
 
+# Run commands to test all or parts of the codebase
 run:
 	$(PY) main.py
 
@@ -58,16 +59,20 @@ run-overlay-no-audio:
 fetch-models:
 	$(PY) facial_recognition/models/fetch_models.py
 
-models: fetch-models
-
 run-summarizer:
 	$(PY) -m summarization.server
 
 db:
 	$(PY) data_access/visualize_db.py --html --limit $(DB_REPORT_LIMIT)
 
-summarizer-setup:
-	$(PY) -m pip install fastapi uvicorn requests
+# setup-server:
+# 	$(PY) -m pip install fastapi uvicorn requests
 
 setup-mac:
 	bash setup_mac.sh
+
+setup-pi:
+	bash setup_pi.sh
+
+setup-server:
+	bash setup_server.sh
