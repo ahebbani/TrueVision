@@ -95,7 +95,10 @@ def main() -> int:
 
     if baud_arg == "auto":
         any_bytes = False
+        bytes_bauds = 0
+        tried_bauds = 0
         for b in list(args.bauds):
+            tried_bauds += 1
             try:
                 total, sync_seen, preview = _probe_once(args.port, int(b), float(args.seconds), int(args.show))
             except Exception as e:
@@ -107,8 +110,17 @@ def main() -> int:
             _print_result(int(b), total, sync_seen, preview)
             print("---")
             any_bytes = any_bytes or (total > 0)
+            if total > 0:
+                bytes_bauds += 1
             if sync_seen:
                 return 0
+        if any_bytes and bytes_bauds == tried_bauds:
+            print(
+                "NOTE: Received bytes at *every* tested baud but never saw AA 55 sync. "
+                "This often means the Pi RX pin is floating/noisy (ESP32 TX not actually connected), "
+                "or the ESP32 is transmitting on a different UART/pin than you think."
+            )
+            print("Try: disconnect ESP32 TX from Pi pin 10 and re-run; bytes_read should drop to 0. If not, RX is floating.")
         return 1 if any_bytes else 4
 
     try:
