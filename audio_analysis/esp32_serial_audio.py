@@ -21,6 +21,8 @@ Extended bidirectional protocol (truevision_main.ino):
         0x10  HEARTBEAT    1-byte: 0x00
         0x11  PI_STATUS    1+ bytes: error_code + optional ASCII
         0x12  ACK          1-byte: echoed TYPE
+        0x13  FORCE_MODE   1-byte: 0x00=AUDIO 0x01=FACE 0x02=BOTH
+        0x14  CLEAR_MODE   0-byte payload
 
 Usage:
     receiver = ESP32SerialAudioReceiver(
@@ -59,6 +61,8 @@ PKT_DIAG_REQUEST = 0x04
 PKT_HEARTBEAT    = 0x10
 PKT_PI_STATUS    = 0x11
 PKT_ACK          = 0x12
+PKT_FORCE_MODE   = 0x13
+PKT_CLEAR_MODE   = 0x14
 
 # PI_STATUS error codes sent in PKT_PI_STATUS payload
 PI_STATUS_OK               = 0x00
@@ -165,7 +169,7 @@ class ESP32SerialAudioReceiver:
         # When True, send PI_STATUS proactively (OLED absent — no other display)
         self.oled_missing: bool = oled_missing
 
-        self._serial: Optional[serial.Serial] = None
+        self._serial: Optional[object] = None
         self._buffer = bytearray()
         self._buffer_lock = threading.Lock()
         self._write_lock = threading.Lock()   # serialise UART writes
@@ -276,6 +280,16 @@ class ESP32SerialAudioReceiver:
 
     def _send_ack(self, acked_type: int) -> None:
         self._send_raw(self._build_packet(PKT_ACK, bytes([acked_type])))
+
+    def force_mode(self, mode_byte: int) -> None:
+        """Force ESP32 effective mode until cleared or heartbeat timeout expires."""
+        if mode_byte not in (MODE_AUDIO, MODE_FACE, MODE_BOTH):
+            raise ValueError(f"Invalid mode byte: {mode_byte}")
+        self._send_raw(self._build_packet(PKT_FORCE_MODE, bytes([mode_byte])))
+
+    def clear_forced_mode(self) -> None:
+        """Clear any active Pi-driven mode override on the ESP32."""
+        self._send_raw(self._build_packet(PKT_CLEAR_MODE, b''))
 
     # ── Heartbeat sender ─────────────────────────────────────────────────────
 

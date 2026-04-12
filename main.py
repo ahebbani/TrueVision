@@ -247,6 +247,8 @@ def recognize_face():
             from audio_analysis.transcription import get_shared_receiver
             from audio_analysis.esp32_serial_audio import probe_esp32_uart_stream
             should_init = (
+                forced_mode is not None
+                or
                 args.audio_source == 'esp32-serial'
                 or (probe_esp32_uart_stream is not None and
                     probe_esp32_uart_stream(port=args.serial_port,
@@ -262,6 +264,11 @@ def recognize_face():
                     on_marker=_on_marker,
                     on_diag_request=_on_diag_request,
                 )
+                if forced_mode is not None:
+                    _esp32_receiver.force_mode(forced_mode)
+                    print(f"ESP32: Forced mode {_mode_label(forced_mode)} sent to firmware")
+                else:
+                    _esp32_receiver.clear_forced_mode()
         except Exception as _recv_err:
             print(f"WARNING: Could not initialise ESP32 receiver for callbacks: {_recv_err}")
 
@@ -769,6 +776,13 @@ def recognize_face():
                 applied_mode = None
 
     try:
+        if _esp32_receiver is not None and forced_mode is not None:
+            try:
+                _esp32_receiver.clear_forced_mode()
+                print("ESP32: Cleared forced mode override")
+            except Exception as _clear_err:
+                print(f"WARNING: Could not clear ESP32 forced mode: {_clear_err}")
+        
         cap.release()
     except Exception:
         pass

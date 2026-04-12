@@ -44,6 +44,8 @@
  *                        Only sent by Pi when its OLED hardware is absent,
  *                        or when responding to DIAG_REQUEST.
  *     0x12  ACK          1-byte payload: echoed TYPE of acknowledged packet
+ *     0x13  FORCE_MODE   1-byte payload: 0x00=AUDIO  0x01=FACE  0x02=BOTH
+ *     0x14  CLEAR_MODE   0-byte payload: clear any active Pi override
  *
  *   PI_STATUS error codes:
  *     0x00  OK
@@ -160,6 +162,8 @@ static HardwareSerial &UART0 = Serial0;
 #define PKT_HEARTBEAT     0x10
 #define PKT_PI_STATUS     0x11
 #define PKT_ACK           0x12
+#define PKT_FORCE_MODE    0x13
+#define PKT_CLEAR_MODE    0x14
 
 // ─── Operating Modes ─────────────────────────────────────────────────────────
 #define MODE_AUDIO  0x00   // Stream audio; Pi skips face recognition
@@ -186,7 +190,10 @@ static SemaphoreHandle_t s_uart_tx_mutex;  // protects all UART writes
 
 // ─── Shared State (written by single owner task; read by others) ──────────────
 static volatile uint8_t  s_mode             = MODE_BOTH;
+static volatile uint8_t  s_switch_mode      = MODE_BOTH;
 static volatile uint8_t  s_last_valid_mode  = MODE_BOTH;
+static volatile bool     s_mode_override_active = false;
+static volatile uint8_t  s_mode_override    = MODE_BOTH;
 static volatile bool     s_mode_invalid     = false;
 static volatile uint32_t s_hb_last_ms       = 0;    // millis() of last heartbeat from Pi
 static volatile bool     s_pi_critical      = false; // Pi sent non-zero PI_STATUS
@@ -231,6 +238,23 @@ static inline void set_link_led(bool on) {
 #endif
 }
 
+static inline bool is_valid_mode_byte(uint8_t mode) {
+    return mode == MODE_AUDIO || mode == MODE_FACE || mode == MODE_BOTH;
+}
+
+static uint8_t resolve_switch_mode(bool pin_a, bool pin_b, bool *valid) {
+    if (pin_a && !pin_b) {
+        if (valid) *valid = true;
+        return MODE_AUDIO;
+    }
+    if (!pin_a && pin_b) {
+        if (valid) *valid = true;
+        return MODE_FACE;
+    }
+    if (valid) *valid = false;
+    return s_last_valid_mode;
+}
+
 /**
  * Build a framed packet into buf[].
  * Returns total number of bytes written (including sync, type, len, data, checksum).
@@ -271,6 +295,11 @@ static void set_mode(uint8_t new_mode) {
     s_mode = new_mode;
     uint8_t payload = new_mode;
     send_control_packet(PKT_MODE_CHANGE, &payload, 1);
+}
+
+static void apply_effective_mode(void) {
+    uint8_t effective_mode = s_mode_override_active ? s_mode_override : s_switch_mode;
+    set_mode(effective_mode);
 }
 
 // ─── LED State Machine (called from Supervisor every tick) ───────────────────
@@ -478,6 +507,19 @@ static void task_uart_rx(void *) {
                     s_hb_last_ms = millis();
                     break;
 
+                case PKT_FORCE_MODE:
+                    if (pkt_len >= 1 && is_valid_mode_byte(data_ptr[0])) {
+                        s_mode_override = data_ptr[0];
+                        s_mode_override_active = true;
+                        apply_effective_mode();
+                    }
+                    break;
+
+                case PKT_CLEAR_MODE:
+                    s_mode_override_active = false;
+                    apply_effective_mode();
+                    break;
+
                 case PKT_PI_STATUS:
                     if (pkt_len >= 1) {
                         s_pi_critical = (data_ptr[0] != 0x00);
@@ -553,19 +595,8 @@ static void task_supervisor(void *) {
         bool pin_a = (digitalRead(MODE_PIN_A) == HIGH);
         bool pin_b = (digitalRead(MODE_PIN_B) == HIGH);
 
-        uint8_t new_mode;
         bool    new_invalid;
-        if (pin_a && !pin_b) {
-            new_mode    = MODE_AUDIO;
-            new_invalid = false;
-        } else if (!pin_a && pin_b) {
-            new_mode    = MODE_FACE;
-            new_invalid = false;
-        } else {
-            // Both identical — invalid state; hold last known good mode
-            new_mode    = s_last_valid_mode;
-            new_invalid = true;
-        }
+        uint8_t new_mode = resolve_switch_mode(pin_a, pin_b, &new_invalid);
 
         s_mode_invalid = new_invalid;
         if (!new_invalid) {
@@ -574,19 +605,33 @@ static void task_supervisor(void *) {
                 sw_last_a = pin_a;
                 sw_last_b = pin_b;
                 s_last_valid_mode = new_mode;
-                set_mode(new_mode);
+                s_switch_mode = new_mode;
+                if (!s_mode_override_active) {
+                    apply_effective_mode();
+                }
             } else if (pin_a != sw_last_a || pin_b != sw_last_b) {
                 sw_last_a = pin_a;
                 sw_last_b = pin_b;
                 s_last_valid_mode = new_mode;
-                set_mode(new_mode);
+                s_switch_mode = new_mode;
+                if (!s_mode_override_active) {
+                    apply_effective_mode();
+                }
             }
         }
 #else
         s_mode_invalid    = false;
-        s_mode            = MODE_BOTH;
+        s_switch_mode     = MODE_BOTH;
         s_last_valid_mode = MODE_BOTH;
+        if (!s_mode_override_active) {
+            apply_effective_mode();
+        }
 #endif
+
+        if (s_mode_override_active && s_hb_last_ms != 0 && (now - s_hb_last_ms) > HEARTBEAT_TIMEOUT_MS) {
+            s_mode_override_active = false;
+            apply_effective_mode();
+        }
 
         // ── Button Debounce ──────────────────────────────────────────────────
 #if ENABLE_MARKER_BUTTON
@@ -717,13 +762,15 @@ void setup() {
 #if ENABLE_MODE_SWITCH
     bool pa = (digitalRead(MODE_PIN_A) == HIGH);
     bool pb = (digitalRead(MODE_PIN_B) == HIGH);
-    (void)pa;
-    (void)pb;
-    s_mode_invalid     = false;
-    s_mode             = MODE_BOTH;
-    s_last_valid_mode  = MODE_BOTH;
+    bool initial_invalid;
+    uint8_t initial_mode = resolve_switch_mode(pa, pb, &initial_invalid);
+    s_mode_invalid     = initial_invalid;
+    s_switch_mode      = initial_mode;
+    s_mode             = initial_mode;
+    s_last_valid_mode  = initial_mode;
 #else
     s_mode_invalid     = false;
+    s_switch_mode      = MODE_BOTH;
     s_mode             = MODE_BOTH;
     s_last_valid_mode  = MODE_BOTH;
 #endif

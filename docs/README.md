@@ -89,10 +89,14 @@ If you want the Raspberry Pi to ignore firmware mode packets and force both subs
 make run-esp32-force-both
 ```
 
+With the current protocol, this target now sends an explicit Pi-to-ESP32 mode override for `BOTH`, so the firmware streams audio and the Pi keeps face recognition enabled regardless of the physical switch position while the app is running.
+
 Direct Pi-side overrides are also available:
 
-- `make run-audio` forces `AUDIO` mode from the Pi side and uses ESP32 UART audio only.
-- `make run-face` replaces the old `make run-no-audio` target and forces `FACE` mode with audio/transcription disabled.
+- `make run-audio` forces `AUDIO` mode on the ESP32 from the Pi side and uses ESP32 UART audio only.
+- `make run-face` replaces the old `make run-no-audio` target and forces `FACE` mode on the ESP32 with audio/transcription disabled.
+
+These force-mode targets clear the override on shutdown. A normal `make run-esp32` (or `python main.py --audio-source esp32-serial ...`) leaves the hardware mode switch authoritative.
 
 Testing board vs production board:
 

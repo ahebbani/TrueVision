@@ -48,7 +48,7 @@ run-esp32:
 	$(PY) main.py --audio-source esp32-serial --serial-baud 921600
 
 run-esp32-force-both:
-	$(PY) main.py --audio-source esp32-serial --no-mode-gate --serial-baud 921600
+	$(PY) main.py --audio-source esp32-serial --serial-baud 921600 --force-mode both
 
 run-speak:
 	$(PY) main.py --speak-captions
@@ -76,3 +76,6 @@ setup-pi:
 
 setup-server:
 	bash setup_server.sh
+
+venv:
+	source .venv/bin/activate
