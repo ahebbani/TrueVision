@@ -132,6 +132,14 @@ def parse_args():
     p.add_argument('--summary-max-sentences', type=int, default=1)
     p.add_argument('--summary-max-chars', type=int, default=140, help='Clamp 1-sentence summaries to this many chars (default: %(default)s)')
     p.add_argument('--prev-summary-max-chars', type=int, default=140, help='Clamp displayed previous-conversation summary (default: %(default)s)')
+    # Server offloading flags
+    p.add_argument('--server-url', default=os.environ.get('TRUEVISION_SERVER_URL', ''),
+                   help='TrueVision server URL (e.g. http://192.168.1.100:8008). '
+                        'Enables dual-mode: face recognition on Pi + audio on server.')
+    p.add_argument('--no-server', action='store_true',
+                   help='Disable server connection entirely (force local-only mode)')
+    p.add_argument('--server-check-interval', type=float, default=30.0,
+                   help='Seconds between server availability re-checks (default: %(default)s)')
     return p.parse_args()
 
 
@@ -308,6 +316,55 @@ def recognize_face():
             print(f"WARNING: Caption speaker init failed ({e}). Speech disabled.")
             speaker = None
 
+    # ── Server connection for offloaded transcription ─────────────────────
+    server_conn = None
+    audio_forwarder = None
+    _server_offload_active = False  # True when server is handling audio
+    _last_server_check = 0.0
+
+    if not getattr(args, 'no_server', False):
+        server_url = getattr(args, 'server_url', '') or ''
+        if server_url or os.environ.get('TRUEVISION_SERVER_URL', ''):
+            try:
+                from audio_analysis.server_connection import ServerConnection
+                server_conn = ServerConnection(
+                    url=server_url or None,
+                    check_interval_sec=getattr(args, 'server_check_interval', 30.0),
+                    timeout_sec=3.0,
+                )
+                # Do a synchronous initial check
+                if server_conn.check():
+                    print(f"Server available: {server_conn.url}")
+                    _server_offload_active = True
+                else:
+                    print("Server not available — running in local-only mode")
+                server_conn.start()
+            except Exception as e:
+                print(f"WARNING: Server connection init failed ({e}). Running local-only.")
+                server_conn = None
+
+    def _ensure_audio_forwarder():
+        """Create the AudioForwarder if server is available and ESP32 receiver exists."""
+        nonlocal audio_forwarder
+        if audio_forwarder is not None:
+            return audio_forwarder
+        if server_conn is None or not server_conn.is_available:
+            return None
+        if _esp32_receiver is None:
+            return None
+        try:
+            from audio_analysis.audio_forwarder import AudioForwarder
+            ws_url = server_conn.ws_url
+            if ws_url is None:
+                return None
+            audio_forwarder = AudioForwarder(ws_url, _esp32_receiver)
+            audio_forwarder.start()
+            print(f"AudioForwarder: Connected to {ws_url}")
+            return audio_forwarder
+        except Exception as e:
+            print(f"WARNING: AudioForwarder init failed ({e}).")
+            return None
+
     def _oled_show_person(name: str, seen_count: Optional[int], last_seen: Optional[str], rec: bool, prev_summary: Optional[str] = None):
         if not _oled:
             return
@@ -360,13 +417,22 @@ def recognize_face():
         if captioner is not None:
             captioner.clear(session_key)
 
+        meeting_id_val = None
         if person_id is not None:
             cursor.execute(
                 "INSERT INTO meetings (person_id, started_at, audio_path) VALUES (?, datetime('now'), ?)",
                 (person_id, audio_path_pending),
             )
-            active_meetings[session_key] = cursor.lastrowid
+            meeting_id_val = cursor.lastrowid
+            active_meetings[session_key] = meeting_id_val
             conn.commit()
+
+        # If server offload is active, signal the forwarder to start streaming
+        if _server_offload_active:
+            fwd = _ensure_audio_forwarder()
+            if fwd is not None and fwd.is_connected:
+                fwd.send_session_start(session_key, person_id=person_id,
+                                       meeting_id=meeting_id_val)
 
     def _stop_session(session_key: int) -> None:
         rec = active_recorders.pop(session_key, None)
@@ -384,6 +450,77 @@ def recognize_face():
             if audio_path_final:
                 print(f"Audio-only session saved to {audio_path_final}")
             return
+
+        # ── Server-offloaded transcription path ──────────────────────────
+        if _server_offload_active and audio_forwarder is not None and audio_forwarder.is_connected:
+            # Signal session end to server — it will do final transcription + summarization
+            prev_summary = ""
+            person_name = None
+            try:
+                cursor.execute(
+                    """SELECT COALESCE(summary,'') FROM meetings
+                       WHERE person_id = ? AND ended_at IS NOT NULL AND id < ?
+                             AND COALESCE(summary,'') != ''
+                       ORDER BY id DESC LIMIT 1""",
+                    (int(session_key), int(meeting_id)),
+                )
+                rprev = cursor.fetchone()
+                prev_summary = (rprev[0] if rprev else "") or ""
+                cursor.execute("SELECT COALESCE(name,'') FROM faces WHERE id = ?", (int(session_key),))
+                rname = cursor.fetchone()
+                person_name = (rname[0] if rname else "") or None
+            except Exception:
+                pass
+
+            audio_forwarder.send_session_end(
+                session_key,
+                previous_summary=prev_summary,
+                person_name=person_name,
+                max_chars=int(getattr(args, 'summary_max_chars', 140)),
+            )
+
+            # Mark meeting as ended; transcript/summary will be filled by the
+            # result-polling thread below.
+            cursor.execute(
+                "UPDATE meetings SET ended_at = datetime('now') WHERE id = ?",
+                (meeting_id,),
+            )
+            conn.commit()
+
+            # Poll for server result in a background thread
+            import threading as _threading
+
+            def _poll_server_result(mid: int, sk: int, db_path: str):
+                try:
+                    from data_access.db import open_db as _open_db
+                    import time as _time
+                    # Wait up to 30s for the server to respond via the WebSocket result
+                    for _ in range(60):
+                        result = audio_forwarder.get_result(sk)
+                        if result is not None:
+                            c2 = _open_db(db_path)
+                            c2.execute(
+                                "UPDATE meetings SET transcript = ?, summary = ? WHERE id = ?",
+                                (result.get("transcript", ""), result.get("summary", ""), mid),
+                            )
+                            c2.commit()
+                            c2.close()
+                            print(f"Server result saved for meeting {mid}")
+                            return
+                        _time.sleep(0.5)
+                    print(f"WARNING: Timed out waiting for server result for meeting {mid}")
+                except Exception as _e:
+                    print(f"Server result poll failed for meeting {mid}: {_e}")
+
+            _t = _threading.Thread(target=_poll_server_result,
+                                   args=(meeting_id, session_key, DB_PATH_DEFAULT),
+                                   daemon=True)
+            _t.start()
+            if audio_forwarder is not None:
+                audio_forwarder.clear(session_key)
+            return
+
+        # ── Local transcription path (original behavior) ────────────────
 
         transcript_text = None
         if audio_path_final and transcription_enabled and transcriber is not None:
@@ -573,6 +710,27 @@ def recognize_face():
             _apply_mode_transition(current_mode[0])
             applied_mode = current_mode[0]
 
+        # ── Periodic server availability check ────────────────────────────
+        if server_conn is not None:
+            now_check = time.time()
+            if (now_check - _last_server_check) > getattr(args, 'server_check_interval', 30.0):
+                _last_server_check = now_check
+                was_active = _server_offload_active
+                _server_offload_active = server_conn.is_available
+
+                if _server_offload_active and not was_active:
+                    print("Server became available — enabling dual-mode (face + server audio)")
+                    _ensure_audio_forwarder()
+                    # Re-apply mode to allow BOTH when server handles audio
+                    applied_mode = None
+                elif not _server_offload_active and was_active:
+                    print("Server became unavailable — falling back to local-only mode")
+                    if audio_forwarder is not None:
+                        audio_forwarder.stop()
+                        audio_forwarder = None
+                    # Re-apply mode so ESP32 gating takes effect again
+                    applied_mode = None
+
         ret, frame = cap.read()
         if not ret:
             break
@@ -600,11 +758,10 @@ def recognize_face():
                 break
 
         recognized_ids_in_frame = set()
-        # Skip face detection only when the ESP32 is connected AND in AUDIO-only mode.
-        # --no-mode-gate remains available as a Pi-side override that forces BOTH
-        # behavior regardless of firmware mode packets.
+        # Skip face detection only when the ESP32 is connected AND in AUDIO-only mode,
+        # UNLESS the server is handling audio (then we can do both).
         _mode_gate_active = (forced_mode is not None) or ((_esp32_receiver is not None) and not getattr(args, 'no_mode_gate', False))
-        _skip_face = _mode_gate_active and (current_mode[0] == MODE_AUDIO)
+        _skip_face = _mode_gate_active and (current_mode[0] == MODE_AUDIO) and not _server_offload_active
         faces_info = [] if _skip_face else recog.detect_and_recognize(conn, frame)
         if not hasattr(recognize_face, "_prev_summaries"):
             recognize_face._prev_summaries = {}
@@ -703,11 +860,18 @@ def recognize_face():
                     cv2.putText(display_frame, "REC", (x, y+45), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
         # Live transcription overlay (closed captioning)
-        if transcription_enabled and captioner is not None and active_recorders:
+        caption = None
+        if _server_offload_active and audio_forwarder is not None and audio_forwarder.is_connected:
+            # Get caption from server via WebSocket
+            for pid in list(active_recorders.keys()):
+                caption = audio_forwarder.get_latest_caption(pid)
+                if caption:
+                    break
+        elif transcription_enabled and captioner is not None and active_recorders:
             captioner.update(active_recorders, active_meetings, cursor)
             caption = captioner.get_caption_for_present(presence_state)
-            # Draw captions at bottom, wrap to fit
-            if caption:
+
+        if caption:
                 if speaker is not None:
                     try:
                         speaker.submit(caption)
@@ -787,6 +951,16 @@ def recognize_face():
     except Exception:
         pass
     cv2.destroyAllWindows()
+    try:
+        if audio_forwarder is not None:
+            audio_forwarder.stop()
+    except Exception:
+        pass
+    try:
+        if server_conn is not None:
+            server_conn.stop()
+    except Exception:
+        pass
     try:
         if speaker is not None:
             speaker.close()

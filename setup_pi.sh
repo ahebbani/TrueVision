@@ -160,6 +160,9 @@ pip install pyttsx3
 # Summarization service client (needed by Pi to contact the remote Ollama service)
 pip install requests
 
+# Server offload support (needed by Pi to discover and stream audio to TrueVision server)
+pip install websocket-client zeroconf
+
 success "pip packages installed."
 
 # ── Step 5: Download dlib model files ─────────────────────────────────────────

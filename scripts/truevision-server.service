@@ -1,0 +1,16 @@
+[Unit]
+Description=TrueVision Server (transcription + summarization)
+After=network-online.target ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=PLACEHOLDER_USER
+WorkingDirectory=PLACEHOLDER_DIR
+Environment=PYTHONUNBUFFERED=1
+ExecStart=PLACEHOLDER_DIR/.venv/bin/python -m server.app
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
