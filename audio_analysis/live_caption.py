@@ -49,8 +49,7 @@ class LiveCaptioner:
                 # Skip transcription this cycle rather than erroring on a missing file.
                 if not flushed:
                     continue
-            # For sounddevice Recorder, the file is written continuously; confirm
-            # it actually exists before handing to Whisper.
+            # Confirm the audio file actually exists before handing to Whisper.
             if not os.path.exists(audio_path):
                 continue
             try:

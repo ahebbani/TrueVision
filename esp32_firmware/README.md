@@ -1,12 +1,6 @@
 # ESP32 TrueVision UART Firmware
 
-The main firmware is `truevision_main.ino`. It streams microphone audio to the Raspberry Pi via UART and also handles mode control, the user button, and optional debug LEDs.
-
-Other sketches in this folder are for isolated testing only:
-
-- `test_audio_generator.ino` simulates audio packets without a microphone
-- `uart0_pi_probe_test.ino` sends simple UART probe traffic
-- `i2s_uart_audio_streamer.ino` is the older single-purpose audio streamer
+The main firmware is `truevision_main.ino`. It streams microphone audio to the Raspberry Pi via UART and also handles mode control, the user button, and debug LEDs.
 
 ## Hardware Required
 
@@ -77,43 +71,14 @@ Connect ESP32 to Raspberry Pi:
 - **Tools → Partition Scheme:** Default 4MB with spiffs
 - **Tools → Port:** Select your ESP32's USB port (e.g., /dev/ttyUSB0)
 
-### 3. Select the firmware profile and upload the sketch
+### 3. Upload the sketch
 
 1. Open `truevision_main.ino` in Arduino IDE
 2. Connect ESP32 to your computer via USB
 3. Click **Upload** button (or press Ctrl+U)
 4. Wait for compilation and upload to complete
 
-Before uploading, set the board profile near the top of the sketch:
-
-```cpp
-#define BOARD_PROFILE_TEST        1
-#define BOARD_PROFILE_PRODUCTION  2
-
-#ifndef BOARD_PROFILE
-#define BOARD_PROFILE BOARD_PROFILE_PRODUCTION
-#endif
-```
-
-Use these profiles:
-
-- `BOARD_PROFILE_TEST`: for the testing ESP32 that does not have the user button, mode switch, or debug LEDs connected
-- `BOARD_PROFILE_PRODUCTION`: for the production ESP32 with the user button, mode switch, and two debug LEDs
-
-Both profiles boot in `BOTH` mode.
-
-Behavior by profile:
-
-- Test profile:
-  - boots in `BOTH`
-  - no hardware mode/button interaction expected
-  - best paired with `make run-esp32` on the Pi
-- Production profile:
-  - boots in `BOTH`
-  - mode switch selects `AUDIO`-only or `FACE`-only
-  - single short press sends a marker
-  - double short press returns to `BOTH`
-  - long press requests diagnostics from the Pi
+The firmware is hardcoded for the production board profile (mode switch on GPIO 35/36, user button on GPIO 11, debug LEDs on GPIO 9/10).
 
 **Troubleshooting Upload Issues:**
 - If upload fails, try holding the **BOOT** button during upload
@@ -184,8 +149,7 @@ For Pi-side overrides without touching the ESP32 switch state:
 - Try lower baud rate (460800 or 115200) if 921600 is unstable
 
 ### Mode / button behavior issues
-- If the testing board appears to react to missing controls, confirm you flashed `BOARD_PROFILE_TEST`
-- If production never changes modes, confirm the switch is wired to the pins used by `truevision_main.ino`
+- Confirm the mode switch is wired to GPIO 35/36 and the button to GPIO 11
 - If you always want the Pi to run both subsystems regardless of firmware mode packets, use `make run-esp32-force-both`
 
 ### Garbled Serial Monitor Output

@@ -134,7 +134,6 @@ class ESP32SerialAudioReceiver:
         port: str = '/dev/serial0',
         baud_rate: int = 921600,
         buffer_seconds: float = 60.0,
-        oled_missing: bool = False,
         on_mode_change: Optional[Callable[[int], None]] = None,
         on_marker: Optional[Callable[[], None]] = None,
         on_diag_request: Optional[Callable[[], None]] = None,
@@ -145,9 +144,6 @@ class ESP32SerialAudioReceiver:
             port: Serial port device path (e.g., '/dev/serial0')
             baud_rate: UART baud rate (921600 recommended for Pi)
             buffer_seconds: Maximum seconds of audio to keep in ring buffer
-            oled_missing: When True, the receiver will push PI_STATUS packets
-                to the ESP32 whenever a non-OK status is set via send_pi_status().
-                If False, PI_STATUS is only sent in response to DIAG_REQUEST.
             on_mode_change: Called with the new mode byte (MODE_AUDIO / MODE_FACE / MODE_BOTH)
                 when the ESP32 sends a PKT_MODE_CHANGE packet.
             on_marker: Called (no args) when the ESP32 sends PKT_MARKER.
@@ -165,9 +161,6 @@ class ESP32SerialAudioReceiver:
         self.on_mode_change: Optional[Callable[[int], None]] = on_mode_change
         self.on_marker: Optional[Callable[[], None]] = on_marker
         self.on_diag_request: Optional[Callable[[], None]] = on_diag_request
-
-        # When True, send PI_STATUS proactively (OLED absent — no other display)
-        self.oled_missing: bool = oled_missing
 
         self._serial: Optional[object] = None
         self._buffer = bytearray()
@@ -302,19 +295,13 @@ class ESP32SerialAudioReceiver:
 
     # ── Public method: push Pi status to ESP32 ────────────────────────────────
 
-    def send_pi_status(self, error_code: int, message: str = '', force: bool = False) -> None:
+    def send_pi_status(self, error_code: int, message: str = '') -> None:
         """Send a PKT_PI_STATUS packet to the ESP32.
 
         Args:
             error_code: One of the PI_STATUS_* constants from this module.
             message:    Optional ASCII description (truncated to 64 characters).
-            force:      If True, send even when oled_missing is False.  The
-                        receiver always sends in response to DIAG_REQUEST
-                        regardless of this flag; call this directly for
-                        proactive status push.
         """
-        if not self.oled_missing and not force:
-            return
         msg_bytes = message[:64].encode('ascii', errors='replace')
         payload = bytes([error_code]) + msg_bytes
         self._send_raw(self._build_packet(PKT_PI_STATUS, payload))
@@ -387,8 +374,7 @@ class ESP32SerialAudioReceiver:
                             print(f"ESP32 Serial Audio: on_marker error: {cb_err}")
 
                 elif pkt_type == PKT_DIAG_REQUEST:
-                    # Always respond with current status + ACK regardless of oled_missing
-                    self.send_pi_status(PI_STATUS_OK, force=True)
+                    self.send_pi_status(PI_STATUS_OK)
                     self._send_ack(PKT_DIAG_REQUEST)
                     if self.on_diag_request is not None:
                         try:

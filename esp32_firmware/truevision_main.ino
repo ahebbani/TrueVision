@@ -118,37 +118,14 @@
 // Serial0 always maps to UART0 hardware pins.
 static HardwareSerial &UART0 = Serial0;
 
-// ─── Board Profile Selection ────────────────────────────────────────────────
-// Keep one sketch source for both boards. Change BOARD_PROFILE (or override it
-// via a compile flag) before flashing.
-#define BOARD_PROFILE_TEST        1
-#define BOARD_PROFILE_PRODUCTION  2
-
-// Active default when no external compile flag overrides BOARD_PROFILE.
-// Change this line before flashing if you want the test-board profile.
-#ifndef BOARD_PROFILE
-#define BOARD_PROFILE BOARD_PROFILE_TEST
-#endif
-
-#if BOARD_PROFILE == BOARD_PROFILE_TEST
-#define ENABLE_STATUS_LEDS    0
-#define ENABLE_MARKER_BUTTON  0
-#define ENABLE_MODE_SWITCH    1
-#define MODE_PIN_A            22   // Test-board switch leg A (uses internal pull-up)
-#define MODE_PIN_B            23   // Test-board switch leg B (uses internal pull-up)
-#define MODE_PIN_MODE         INPUT_PULLUP
-#elif BOARD_PROFILE == BOARD_PROFILE_PRODUCTION
-// The production hardware described for this project has one user button, a
-// mode switch, and two programmable debug LEDs.
+// ─── Board Profile ───────────────────────────────────────────────────────────
+// Production board: user button, mode switch, and two debug LEDs.
 #define ENABLE_STATUS_LEDS    1
 #define ENABLE_MARKER_BUTTON  1
 #define ENABLE_MODE_SWITCH    1
 #define MODE_PIN_A            35   // Production switch leg A
 #define MODE_PIN_B            36   // Production switch leg B
 #define MODE_PIN_MODE         INPUT
-#else
-#error "Unsupported BOARD_PROFILE"
-#endif
 
 // ─── Protocol ────────────────────────────────────────────────────────────────
 #define SYNC_BYTE_1       0xAA

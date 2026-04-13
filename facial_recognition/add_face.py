@@ -3,8 +3,6 @@ import dlib
 import numpy as np
 import os
 import sys
-import time
-import platform
 
 # Initialize face detector and shape predictor
 detector = dlib.get_frontal_face_detector()
@@ -12,7 +10,6 @@ detector = dlib.get_frontal_face_detector()
 # Resolve paths relative to this file so it works from any CWD
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.path.join(BASE_DIR, 'models')
-# Legacy DB_DIR removed; database now centrally managed in data_access.
 
 predictor_path = os.path.join(MODELS_DIR, 'shape_predictor_68_face_landmarks.dat')
 predictor = dlib.shape_predictor(predictor_path)
@@ -27,144 +24,17 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from data_access import open_db
+from facial_recognition.camera import open_camera
 
 # Reuse centralized DB (schema ensured automatically)
 conn = open_db()
 cursor = conn.cursor()
 
-CAMERA_BACKEND = os.environ.get('CAMERA_BACKEND', 'auto')  # 'auto' | 'opencv' | 'gstreamer' | 'picamera2'
-CAMERA_INDEX = int(os.environ.get('CAMERA_INDEX', '0'))   # used when backend == 'opencv'
-
-def _try_open_opencv_device(index: int, w: int, h: int, fps: int):
-    cap = cv2.VideoCapture(index)
-    if not cap.isOpened():
-        if platform.system() == 'Darwin':
-            cap2 = cv2.VideoCapture(index, cv2.CAP_AVFOUNDATION)
-            if cap2.isOpened():
-                cap2.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-                cap2.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-                cap2.set(cv2.CAP_PROP_FPS, fps)
-                ok, _ = cap2.read()
-                if ok:
-                    print(f"Camera: Opened via OpenCV AVFoundation (device index {index})")
-                    return cap2
-                cap2.release()
-        return None
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-    cap.set(cv2.CAP_PROP_FPS, fps)
-    ok, _ = cap.read()
-    if ok:
-        print(f"Camera: Opened via OpenCV (device index {index})")
-        return cap
-    cap.release()
-    return None
-
-
-def _try_open_gstreamer_libcamera(w: int, h: int, fps: int):
-    pipeline = (
-        f"libcamerasrc ! video/x-raw, width={w}, height={h}, framerate={fps}/1 "
-        f"! videoconvert ! video/x-raw, format=BGR ! appsink"
-    )
-    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
-    if not cap.isOpened():
-        return None
-
-    class GstCameraCapture:
-        def __init__(self, base_cap):
-            self._cap = base_cap
-
-        def isOpened(self):
-            return self._cap.isOpened()
-
-        def read(self):
-            return self._cap.read()
-
-        def release(self):
-            try:
-                self._cap.release()
-            except Exception:
-                pass
-
-    ok, _ = cap.read()
-    if not ok:
-        cap.release()
-        return None
-    print("Camera: Opened via GStreamer libcamera pipeline (BGR output)")
-    return GstCameraCapture(cap)
-
-
-def _try_open_picamera2(w: int, h: int):
-    try:
-        from picamera2 import Picamera2
-
-        class PiCam2Capture:
-            def __init__(self, width: int, height: int):
-                self._picam2 = Picamera2()
-                config = self._picam2.create_preview_configuration(
-                    main={"size": (width, height), "format": "BGR888"}
-                )
-                self._picam2.configure(config)
-                self._picam2.start()
-
-            def read(self):
-                arr = self._picam2.capture_array()  # already BGR
-                return True, arr
-
-            def isOpened(self):
-                return True
-
-            def release(self):
-                self._picam2.stop()
-                try:
-                    self._picam2.close()
-                except Exception:
-                    pass
-
-        print("Camera: Using Picamera2 fallback")
-        return PiCam2Capture(w, h)
-    except Exception:
-        return None
-
-
-def open_camera(preferred_width: int = 640, preferred_height: int = 480, preferred_fps: int = 30):
-    backend = CAMERA_BACKEND.lower().strip()
-    def try_sequence(seq):
-        for name in seq:
-            if name == 'opencv':
-                cap = _try_open_opencv_device(CAMERA_INDEX, preferred_width, preferred_height, preferred_fps)
-                if cap is not None:
-                    return cap
-            elif name == 'gstreamer':
-                cap = _try_open_gstreamer_libcamera(preferred_width, preferred_height, preferred_fps)
-                if cap is not None:
-                    return cap
-            elif name == 'picamera2':
-                cap = _try_open_picamera2(preferred_width, preferred_height)
-                if cap is not None:
-                    return cap
-        return None
-
-    if backend == 'opencv':
-        return try_sequence(['opencv'])
-    elif backend == 'gstreamer':
-        return try_sequence(['gstreamer'])
-    elif backend == 'picamera2':
-        return try_sequence(['picamera2'])
-    else:
-        # On Linux (Raspberry Pi), prefer GStreamer and Picamera2 over raw V4L2.
-        # See camera.py for the full explanation.
-        import platform as _platform
-        if _platform.system() == 'Linux':
-            return try_sequence(['gstreamer', 'picamera2', 'opencv'])
-        return try_sequence(['opencv', 'gstreamer', 'picamera2'])
-
 
 def add_face(name):
     cap = open_camera()
     if cap is None:
-        print("ERROR: Could not open any camera. On Raspberry Pi, ensure libcamera works (try: libcamera-hello).\n"
-              "Install either python3-opencv with GStreamer support, or python3-picamera2.")
+        print("ERROR: Could not open camera. Ensure Picamera2 is installed and the RPi camera is connected.")
         return
     print("Press 's' to capture the face and save it.")
 

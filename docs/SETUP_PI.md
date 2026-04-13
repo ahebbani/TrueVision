@@ -1,13 +1,7 @@
-# Raspberry Pi 4B setup (Debian Trixie/Bookworm 64-bit)
+# Raspberry Pi 5 setup (Debian Trixie/Bookworm 64-bit)
 
-This project uses OpenCV and dlib with a Raspberry Pi Camera Module 3. Below is a tested path for Raspberry Pi OS (Debian Bookworm/Trixie flavor) on a Pi 4B.
-
-The code has been updated to be Pi-friendly: it will try to open the camera via, in order:
-- OpenCV V4L2 device (/dev/video0)
-- GStreamer libcamera pipeline
-- Picamera2
-
-So you can use whichever stack is available on your image.
+This project uses Picamera2, OpenCV, and dlib with a Raspberry Pi Camera Module on a Pi 5.
+The camera backend is Picamera2 exclusively.
 
 ## 1) Update OS and enable camera
 
@@ -163,36 +157,9 @@ bunzip2 dlib_face_recognition_resnet_model_v1.dat.bz2
 
 If you add the CNN detector file, you can run with `FACE_DETECTOR=cnn` to prefer it.
 
-## 4) Quick camera sanity checks
+## 4) Quick camera sanity check
 
-- Verify OpenCV can open the default device:
-
-```bash
-python3 - <<'PY'
-import cv2
-cap = cv2.VideoCapture(0)
-print('V4L2 device opened:', cap.isOpened())
-ret, frame = cap.read()
-print('Got frame:', ret, 'shape:' if ret else '', frame.shape if ret else '')
-cap.release()
-PY
-```
-
-- If that prints `False`, try the libcamera GStreamer pipeline (works only if your OpenCV has GStreamer, which it does when installed from apt):
-
-```bash
-python3 - <<'PY'
-import cv2
-pipeline = 'libcamerasrc ! video/x-raw, width=640, height=480, framerate=30/1 ! videoconvert ! video/x-raw, format=BGR ! appsink'
-cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
-print('GStreamer opened:', cap.isOpened())
-ret, frame = cap.read()
-print('Got frame:', ret, 'shape:' if ret else '', frame.shape if ret else '')
-cap.release()
-PY
-```
-
-- If both fail, Picamera2 should work:
+Verify Picamera2 can open the camera:
 
 ```bash
 python3 - <<'PY'
@@ -206,6 +173,8 @@ print('Picamera2 frame:', arr.shape)
 picam2.stop(); picam2.close()
 PY
 ```
+
+If this fails, make sure `rpicam-hello` works and libcamera is functioning correctly.
 
 ## 5) Enroll faces (one-time)
 
@@ -256,7 +225,7 @@ python3 main.py
 
 ## 8) Troubleshooting
 
-- Camera won’t open: make sure `rpicam-hello` (or `libcamera-hello` on older images) works first. Then rely on the built-in fallbacks; the program will print which backend it’s using.
+- Camera won't open: make sure `rpicam-hello` (or `libcamera-hello` on older images) works first. The program uses Picamera2 exclusively.
 - Import errors for `cv2`/`dlib`: ensure you’re using the system Python, or a venv created with `--system-site-packages` so it can see `python3-opencv` and `python3-dlib` from apt.
 - "No display" errors: you’re headless; see notes above.
 - Slow performance on CNN detector: use default HOG detector, reduce resolution, and avoid full-screen windows.
@@ -407,56 +376,3 @@ python -c "import cv2; print(cv2.__version__)"
 
 If you hit anything not covered here, tell me what failed and the exact error/output, and I’ll tailor the next steps.
 
-## 9) Optional: SSD1306 128x64 OLED status display
-
-Mirror recognition info (name, seen count, last seen, REC) to a small OLED connected to the GPIO header.
-
-Supported: SSD1306/SH1106 128x64 over I2C using the `luma.oled` library.
-
-1) Enable I2C and wire the display
-
-```bash
-sudo raspi-config nonint do_i2c 0
-sudo reboot
-```
-
-Wiring for I2C (most common SSD1306 breakout):
-
-- VCC -> 3V3 (pin 1)
-- GND -> GND (pin 6)
-- SCL -> GPIO3 SCL1 (pin 5)
-- SDA -> GPIO2 SDA1 (pin 3)
-
-Most SSD1306 boards default to I2C address 0x3C.
-
-2) Install dependencies
-
-Prefer apt for the I2C stack and use pip for Python libs if not already present:
-
-```bash
-sudo apt install -y python3-smbus i2c-tools
-# Optional: check the display is visible on bus 1 (look for 0x3c)
-sudo i2cdetect -y 1 | cat
-
-# In your venv (if using one)
-pip install luma.oled Pillow
-```
-
-3) Enable OLED in the app
-
-The OLED is off by default. Enable it with an environment variable:
-
-```bash
-cd ~/TrueVision/facial_recognition
-OLED=1 python3 main.py
-```
-
-Optional environment variables:
-
-- `OLED_I2C_BUS` (default `1`)
-- `OLED_I2C_ADDR` (default `0x3C`)
-- `OLED_DRIVER` (`ssd1306` or `sh1106`, default `ssd1306`)
-- `OLED_WIDTH` / `OLED_HEIGHT` (defaults `128`/`64`)
-- `OLED_FONT` (path to .ttf) and `OLED_FONT_SIZE` (default `12`)
-
-If your module uses SPI instead of I2C, either reconfigure the panel for I2C (often by moving jumpers) or extend `oled_display.py` to initialize an SPI interface using luma.oled.

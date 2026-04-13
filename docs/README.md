@@ -3,59 +3,39 @@ Senior design smart glasses project.
 
 ## Setup quickstart
 
-- Raspberry Pi 4B users: follow `facial_recognition/SETUP_PI.md`. In short, install OpenCV and dlib from apt, not pip. Then install Python deps with:
+Raspberry Pi 5 with RPi Camera + ESP32 (production board):
 
 ```bash
-pip install -r requirements.txt
+bash setup_pi.sh
 ```
 
-- Desktop dev (Linux/macOS/Windows):
+Server (Linux machine with GPU for transcription/summarization offload):
 
 ```bash
-pip install -r requirements.txt
-# Add desktop extras (OpenCV, dlib, optional faster-whisper):
-pip install -r requirements-desktop.txt
+bash setup_server.sh
 ```
 
-Optional: to add speech-to-text only, use:
-
-```bash
-pip install -r requirements-faster-whisper.txt
-```
-
-## Project layout (after refactor)
+## Project layout
 
 ```
 facial_recognition/        # Face detection & recognition (models + helper scripts)
-audio_analysis/            # Transcription & summarization (Whisper wrapper)
-oled_output/               # Optional SSD1306 OLED display integration & test harness
+audio_analysis/            # ESP32 serial audio, transcription, live captioning
 data_access/               # faces.db + centralized schema & helpers
 data/                      # recordings/ (audio WAV files per meeting)
+server/                    # TrueVision server (transcription + summarization offload)
+summarization/             # Ollama/LLM summarization client & utilities
+esp32_firmware/            # Production ESP32 firmware (I2S mic + UART + mode switch)
+scripts/                   # systemd service installers
 main.py                    # Top-level application entry point
 ```
 
 Run commands from the repository root so Python can discover sibling packages.
 
-## OLED display
-
-An SSD1306 128x64 OLED (like Adafruit’s 0.96" STEMMA QT) can mirror on-screen labels (name, seen count, last seen, REC). If the OLED libraries and hardware are available, the app will use it automatically; otherwise it will continue without OLED output.
-
-See `facial_recognition/SETUP_PI.md` section "Optional: SSD1306 OLED" for wiring details. You can test the OLED module independently with:
-
-```bash
-python -m oled_output.test_oled
-```
-
 ## Transcription (audio analysis)
 
-Whisper-based recording & transcription lives in `audio_analysis/transcription.py`.
-It is imported dynamically by `facial_recognition/main.py`; if dependencies (sounddevice, faster-whisper) are missing, the app continues with transcription disabled.
-
-To install only the extra speech-to-text dependencies:
-
-```bash
-pip install -r requirements-faster-whisper.txt
-```
+Whisper-based transcription lives in `audio_analysis/transcription.py`.
+Audio is captured from the ESP32 via UART serial (`audio_analysis/esp32_serial_audio.py`).
+If dependencies (faster-whisper) are missing, the app continues with transcription disabled.
 
 ## Running main application
 
@@ -69,9 +49,9 @@ Press `t` inside the app window to toggle transcription at runtime; press `q` to
 
 ## ESP32 runtime modes
 
-The current ESP32 main firmware (`esp32_firmware/truevision_main.ino`) now boots in `BOTH` mode by default. That means the normal Pi-side command no longer needs `--no-mode-gate` just to get simultaneous audio transcription and facial recognition.
+The ESP32 production firmware (`esp32_firmware/truevision_main.ino`) boots in `BOTH` mode by default — simultaneous audio transcription and facial recognition.
 
-Recommended Pi-side command for ESP32 audio:
+Recommended Pi-side command:
 
 ```bash
 make run-esp32
@@ -83,147 +63,46 @@ This runs:
 python main.py --audio-source esp32-serial --serial-baud 921600
 ```
 
-If you want the Raspberry Pi to ignore firmware mode packets and force both subsystems on from the Pi side, use:
+If you want the Raspberry Pi to ignore firmware mode packets and force both subsystems on from the Pi side:
 
 ```bash
 make run-esp32-force-both
 ```
 
-With the current protocol, this target now sends an explicit Pi-to-ESP32 mode override for `BOTH`, so the firmware streams audio and the Pi keeps face recognition enabled regardless of the physical switch position while the app is running.
-
-Direct Pi-side overrides are also available:
+Direct Pi-side overrides:
 
 - `make run-audio` forces `AUDIO` mode on the ESP32 from the Pi side and uses ESP32 UART audio only.
-- `make run-face` replaces the old `make run-no-audio` target and forces `FACE` mode on the ESP32 with audio/transcription disabled.
+- `make run-face` forces `FACE` mode on the ESP32 with audio/transcription disabled.
 
-These force-mode targets clear the override on shutdown. A normal `make run-esp32` (or `python main.py --audio-source esp32-serial ...`) leaves the hardware mode switch authoritative.
+These force-mode targets clear the override on shutdown. A normal `make run-esp32` leaves the hardware mode switch authoritative.
 
-Testing board vs production board:
+The production board has:
+- A mode switch to select `AUDIO`-only or `FACE`-only after boot
+- A user button: single short press sends a meeting marker, double short press returns to `BOTH`, long press sends a diagnostics request
+- Two debug LEDs for audio/hardware health and Pi link health
 
-- Testing board:
-	Flash `esp32_firmware/truevision_main.ino` with `BOARD_PROFILE` set to `BOARD_PROFILE_TEST` in the sketch. This profile expects no mode switch, no user button, and no debug LEDs. It boots in `BOTH` mode and stays there, so `make run-esp32` gives simultaneous face recognition and transcription.
-- Production board:
-	The sketch currently defaults to `BOARD_PROFILE_PRODUCTION`. It boots in `BOTH`, enables the two debug LEDs, enables the user button, and enables the mode switch. In this profile:
-	- the mode switch selects `AUDIO`-only or `FACE`-only after boot
-	- a single short press sends a meeting marker
-	- a double short press returns to `BOTH`
-	- a long press sends a diagnostics request
+## Off-device LLM summarization
 
-For both boards, the Pi-side runtime command is the same: `make run-esp32`. The difference is entirely in the firmware profile you flash.
+Meeting summaries are generated by a TrueVision server running on a more powerful machine with GPU support. The server handles transcription offload and LLM summarization via Ollama.
 
-## Off-device LLM summarization (Ollama)
-
-If you want meeting summaries to be generated by a local LLM running on a more powerful machine (not the Raspberry Pi), run the summarization service on that machine.
-
-Install service dependencies:
+Start the server:
 
 ```bash
-pip install -r requirements-summarization-service.txt
-```
-
-Ensure Ollama is running and the model is pulled:
-
-```bash
-ollama serve
-ollama pull llama3.1:8b
-```
-
-Run the service:
-
-```bash
-python -m summarization.server
-# or
-make run-summarizer
+make run-server
 ```
 
 Environment variables:
 
 - `OLLAMA_URL` (default: `http://127.0.0.1:11434`)
 - `OLLAMA_MODEL` (default: `llama3.1:8b`)
-- `SUMMARIZER_HOST` (default: `0.0.0.0`)
-- `SUMMARIZER_PORT` (default: `8008`)
+- `TRUEVISION_SERVER_PORT` (default: `8008`)
 
-Test:
+On the Pi side, set the server URL to enable offloading:
 
 ```bash
-curl -s http://localhost:8008/health | jq
-curl -s http://localhost:8008/summarize \
-	-H 'Content-Type: application/json' \
-	-d '{"transcript":"We discussed adding off-device summaries and agreed to use Ollama.","max_chars":140}' | jq
+make run-esp32 TRUEVISION_SERVER_URL=http://192.168.1.100:8008
 ```
-
-## Getting Started: Raspberry Pi vs Desktop
-
-Choose the path that matches your environment. Run commands from the repo root so Python can discover sibling packages.
-
-- Raspberry Pi (recommended for hardware integration):
-	- Install OpenCV and dlib via apt (per `facial_recognition/SETUP_PI.md`).
-	- Install Python deps:
-		```bash
-		pip install -r requirements.txt
-		```
-	- Optional: enable OLED and test it:
-		```bash
-		OLED=1 python -m oled_output.test_oled
-		```
-	- Run the app:
-		```bash
-		python main.py
-		```
-	- Optional: add speech-to-text (sizeable install):
-		```bash
-		pip install -r requirements-faster-whisper.txt
-		```
-
-	- If you’re missing dlib model files (shape predictor / face recognition), fetch them:
-		```bash
-		python -m facial_recognition.models.fetch_models
-		```
-
-- Desktop (Linux/macOS/Windows):
-	- Install core deps:
-		```bash
-		pip install -r requirements.txt
-		```
-	- Add desktop extras (OpenCV, dlib, optional faster-whisper):
-		```bash
-		pip install -r requirements-desktop.txt
-		```
-	- Run the app:
-		```bash
-		python main.py
-		```
-	- Notes: OLED and Pi-specific camera backends may be unavailable; the app falls back gracefully. If OpenCV build lacks GStreamer, set `CAMERA_BACKEND=opencv`.
-	- If models are missing, download them:
-		```bash
-		python -m facial_recognition.models.fetch_models
-		```
 
 ## Database & audio linkage
 
-Audio recordings are stored per meeting in the `meetings` table (columns: `person_id`, `audio_path`, `transcript`, `summary`). Each meeting row links back to a person in `faces`. We avoid duplicating audio paths in `faces`; multiple meetings can exist per person. Shared schema + pruning logic lives in `data_access/db.py`. The SQLite file `faces.db` now resides directly in `data_access/`. Audio files saved under `data/recordings/`.
-
-## Copy audio files off the Pi (scp)
-
-Run these commands on your **Mac/PC terminal** (the destination machine), not inside an SSH session on the Pi.
-
-Copy a single file from the Pi repo root into your current local directory:
-
-```bash
-scp adity@raspberrypi.local:~/Files/TrueVision/esp32_test_audio_20260402_000557.wav .
-```
-
-Copy all ESP32 test WAVs into Downloads:
-
-```bash
-# macOS zsh note: quote/escape the '*' (or use `noglob`) so the wildcard expands on the Pi side.
-scp "adity@raspberrypi.local:~/Files/TrueVision/esp32_test_audio_*.wav" ~/Downloads/
-# Alternative:
-# noglob scp adity@raspberrypi.local:~/Files/TrueVision/esp32_test_audio_*.wav ~/Downloads/
-```
-
-If `raspberrypi.local` doesn’t resolve, replace it with the Pi’s IP address:
-
-```bash
-scp adity@192.168.x.y:~/Files/TrueVision/esp32_test_audio_*.wav ~/Downloads/
-```
+Audio recordings are stored per meeting in the `meetings` table (columns: `person_id`, `audio_path`, `transcript`, `summary`). Each meeting row links back to a person in `faces`. Shared schema + pruning logic lives in `data_access/db.py`. The SQLite file `faces.db` resides in `data_access/`. Audio files saved under `data/recordings/`.

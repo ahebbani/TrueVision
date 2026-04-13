@@ -2,7 +2,7 @@
 
 Responsibilities:
 - Parse flags/environment, configure subsystems
-- Wire camera, recognizer, audio transcription, OLED, and DB
+- Wire camera, recognizer, audio transcription, and DB
 - Drive the main loop; subsystems encapsulate specific logic
 
 Run:
@@ -75,8 +75,6 @@ def _log_system_diagnostics():
 def parse_args():
     p = argparse.ArgumentParser(description="TrueVision runtime")
     # Camera flags
-    p.add_argument('--camera-backend', default=os.environ.get('CAMERA_BACKEND', 'auto'), choices=['auto','opencv','gstreamer','picamera2'])
-    p.add_argument('--camera-index', type=int, default=int(os.environ.get('CAMERA_INDEX', '0')))
     p.add_argument('--camera-width', type=int, default=640)
     p.add_argument('--camera-height', type=int, default=480)
     p.add_argument('--camera-fps', type=int, default=30)
@@ -93,28 +91,7 @@ def parse_args():
     p.add_argument('--caption-interval', type=float, default=0.7, help='Seconds between caption updates')
     p.add_argument('--caption-max-words', type=int, default=30)
     p.add_argument('--caption-max-lines', type=int, default=2)
-    # Caption speech (TTS)
-    p.add_argument(
-        '--speak-captions',
-        action='store_true',
-        default=bool(int(os.environ.get('SPEAK_CAPTIONS', '0'))),
-        help='Speak generated live captions (best-effort; requires TTS backend)'
-    )
-    p.add_argument(
-        '--speech-rate',
-        type=int,
-        default=int(os.environ.get('SPEECH_RATE', '175')),
-        help='Speech rate in words per minute (backend-dependent)'
-    )
-    p.add_argument(
-        '--speech-volume',
-        type=float,
-        default=float(os.environ.get('SPEECH_VOLUME', '1.0')),
-        help='Speech volume 0.0-1.0 (backend-dependent)'
-    )
     # Audio source flags
-    p.add_argument('--audio-source', default='auto', choices=['auto', 'sounddevice', 'esp32-serial'],
-                   help='Audio input source: auto (prefer ESP32 UART if streaming), sounddevice (local mic), or esp32-serial (force ESP32 via UART)')
     p.add_argument('--serial-port', default='/dev/serial0', help='Serial port for ESP32 audio (default: /dev/serial0)')
     p.add_argument('--serial-baud', type=int, default=921600, help='Baud rate for ESP32 serial')
     p.add_argument('--no-mode-gate', action='store_true', default=False,
@@ -152,19 +129,9 @@ def recognize_face():
     conn = open_db()
     cursor = conn.cursor()
 
-    # Optional OLED (deferred — I2C init can block on Pi if bus is hung)
-    try:
-        from oled_output.oled_display import get_display, _DummyDisplay
-        _oled = get_display()
-        _oled_missing = isinstance(_oled, _DummyDisplay)
-    except Exception:
-        _oled = None
-        _oled_missing = True
-
-    cap = open_camera(args.camera_backend, args.camera_index, args.camera_width, args.camera_height, args.camera_fps)
+    cap = open_camera(args.camera_width, args.camera_height)
     if cap is None:
-        print("ERROR: Could not open any camera. On Raspberry Pi, ensure libcamera works (try: libcamera-hello).\n"
-              "Install either python3-opencv with GStreamer support, or python3-picamera2.")
+        print("ERROR: Could not open camera. Ensure Picamera2 is installed and the RPi camera is connected.")
         return
     print("Press 'q' to quit.")
     if args.audio:
@@ -190,7 +157,6 @@ def recognize_face():
     transcription_enabled = args.audio
     active_recorders = {}
     active_meetings = {}
-    Recorder = None
     create_recorder = None
     Transcriber = None
     def summarize_text(txt: str, max_sentences: int = 5) -> str:
@@ -198,12 +164,11 @@ def recognize_face():
     if transcription_enabled:
         try:
             from audio_analysis.transcription import (
-                Recorder as _Recorder,
                 create_recorder as _create_recorder,
                 Transcriber as _Transcriber,
                 summarize_text as _summarize_text,
             )
-            Recorder, create_recorder, Transcriber, summarize_text = _Recorder, _create_recorder, _Transcriber, _summarize_text
+            create_recorder, Transcriber, summarize_text = _create_recorder, _Transcriber, _summarize_text
         except Exception as e:
             print(f"WARNING: Transcription modules unavailable ({e}). Transcription disabled.")
             transcription_enabled = False
@@ -243,35 +208,28 @@ def recognize_face():
         _marker_queue.put(datetime.now().strftime("%H:%M:%S"))
 
     def _on_diag_request() -> None:
-        # Diagnostic handler: if OLED is absent the send_pi_status call inside
-        # _receiver_loop already pushes current status.  Log here for visibility.
         print("ESP32: DIAG_REQUEST received; status pushed to ESP32.")
 
     # Wire up callbacks on the shared receiver if using esp32-serial audio.
-    # For 'auto', do a quick probe so we set callbacks before the main loop.
     _esp32_receiver = None
-    if args.audio_source in ('esp32-serial', 'auto'):
-        try:
-            from audio_analysis.transcription import get_shared_receiver
-            from audio_analysis.esp32_serial_audio import probe_esp32_uart_stream
-            should_init = (
-                forced_mode is not None
-                or
-                args.audio_source == 'esp32-serial'
-                or (probe_esp32_uart_stream is not None and
-                    probe_esp32_uart_stream(port=args.serial_port,
-                                            baud_rate=args.serial_baud,
-                                            timeout_sec=1.0))
+    try:
+        from audio_analysis.transcription import get_shared_receiver
+        from audio_analysis.esp32_serial_audio import probe_esp32_uart_stream
+        should_init = (
+            forced_mode is not None
+            or (probe_esp32_uart_stream is not None and
+                probe_esp32_uart_stream(port=args.serial_port,
+                                        baud_rate=args.serial_baud,
+                                        timeout_sec=1.0))
+        )
+        if should_init:
+            _esp32_receiver = get_shared_receiver(
+                serial_port=args.serial_port,
+                serial_baud=args.serial_baud,
+                on_mode_change=_on_mode_change,
+                on_marker=_on_marker,
+                on_diag_request=_on_diag_request,
             )
-            if should_init:
-                _esp32_receiver = get_shared_receiver(
-                    serial_port=args.serial_port,
-                    serial_baud=args.serial_baud,
-                    oled_missing=_oled_missing,
-                    on_mode_change=_on_mode_change,
-                    on_marker=_on_marker,
-                    on_diag_request=_on_diag_request,
-                )
                 if forced_mode is not None:
                     _esp32_receiver.force_mode(forced_mode)
                     print(f"ESP32: Forced mode {_mode_label(forced_mode)} sent to firmware")
@@ -296,25 +254,6 @@ def recognize_face():
             transcriber,
             CaptionConfig(interval_sec=args.caption_interval, max_words=args.caption_max_words),
         )
-
-    # Optional caption speaker (TTS)
-    speaker = None
-    if getattr(args, 'speak_captions', False):
-        try:
-            from audio_analysis.caption_speaker import CaptionSpeaker, CaptionSpeakerConfig
-
-            speaker = CaptionSpeaker(
-                CaptionSpeakerConfig(
-                    enabled=True,
-                    rate_wpm=int(getattr(args, 'speech_rate', 175)),
-                    volume=float(getattr(args, 'speech_volume', 1.0)),
-                )
-            )
-            if not getattr(speaker, 'available', False):
-                print("WARNING: --speak-captions enabled but no TTS backend found (install pyttsx3 or espeak).")
-        except Exception as e:
-            print(f"WARNING: Caption speaker init failed ({e}). Speech disabled.")
-            speaker = None
 
     # ── Server connection for offloaded transcription ─────────────────────
     server_conn = None
@@ -365,31 +304,8 @@ def recognize_face():
             print(f"WARNING: AudioForwarder init failed ({e}).")
             return None
 
-    def _oled_show_person(name: str, seen_count: Optional[int], last_seen: Optional[str], rec: bool, prev_summary: Optional[str] = None):
-        if not _oled:
-            return
-        lines = [name or "Unknown"]
-        meta = []
-        if seen_count is not None:
-            meta.append(f"seen {seen_count}")
-        if last_seen:
-            meta.append(f"last {last_seen}")
-        if meta:
-            lines.append(" • ".join(meta))
-        if prev_summary:
-            lines.append(prev_summary)
-        if rec:
-            lines.append("REC")
-        _oled.update_text(lines)
-
-    def _oled_idle():
-        if not _oled:
-            return
-        _oled.update_text(["No one", datetime.now().strftime("%H:%M:%S")])
-
     try:
-        if _oled:
-            _oled.update_text(["Ready", datetime.now().strftime("%H:%M:%S")])
+        pass  # ready
     except Exception:
         pass
 
@@ -399,12 +315,11 @@ def recognize_face():
             return
         if create_recorder:
             rec = create_recorder(
-                audio_source=args.audio_source,
                 serial_port=args.serial_port,
                 serial_baud=args.serial_baud,
             )
         else:
-            rec = Recorder()
+            return
         try:
             audio_path_pending = rec.start(RECORDINGS_DIR, label_prefix)
         except Exception as _rec_err:
@@ -818,13 +733,6 @@ def recognize_face():
                     if recognized_seen_count is not None:
                         recognized_seen_count += 1
                     recognized_last_seen_str = "now"
-                    _oled_show_person(
-                        recognized_name,
-                        recognized_seen_count,
-                        recognized_last_seen_str,
-                        transcription_enabled,
-                        prev_summary=prev_summary,
-                    )
                     mode_allows_recording = (not _mode_gate_active) or (current_mode[0] != MODE_FACE)
                     if transcription_enabled and recognized_id not in active_recorders and mode_allows_recording:
                         _start_session(
@@ -872,11 +780,6 @@ def recognize_face():
             caption = captioner.get_caption_for_present(presence_state)
 
         if caption:
-                if speaker is not None:
-                    try:
-                        speaker.submit(caption)
-                    except Exception:
-                        pass
                 img_h, img_w = display_frame.shape[0], display_frame.shape[1]
                 margin = 10
                 font = cv2.FONT_HERSHEY_SIMPLEX
@@ -906,9 +809,6 @@ def recognize_face():
                     cv2.putText(display_frame, ln, (margin, y), font, font_scale, (255, 255, 255), thickness)
                     y += line_height
 
-        if _oled and len(faces_info) == 0 and all(v != 'present' for v in presence_state.values()):
-            _oled_idle()
-
         now_ts = time.time()
         for pid, state in list(presence_state.items()):
             if pid == AUDIO_SESSION_KEY:
@@ -919,8 +819,6 @@ def recognize_face():
                     presence_state[pid] = 'absent'
                     if pid in active_recorders:
                         _stop_session(pid)
-                    if _oled and all(v == 'absent' for v in presence_state.values()):
-                        _oled_idle()
 
         cv2.imshow("Face Recognition", display_frame)
         key = cv2.waitKey(1)
@@ -959,16 +857,6 @@ def recognize_face():
     try:
         if server_conn is not None:
             server_conn.stop()
-    except Exception:
-        pass
-    try:
-        if speaker is not None:
-            speaker.close()
-    except Exception:
-        pass
-    try:
-        if _oled:
-            _oled.clear()
     except Exception:
         pass
 

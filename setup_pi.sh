@@ -28,13 +28,13 @@ if ! grep -qi "raspberry pi" /proc/cpuinfo 2>/dev/null && \
 fi
 
 # ── Step 1: System package update ─────────────────────────────────────────────
-info "=== Step 1/7: Updating system packages ==="
+info "=== Step 1/6: Updating system packages ==="
 sudo apt-get update -y
 sudo apt-get full-upgrade -y
 success "System packages updated."
 
 # ── Step 2: Install apt dependencies ──────────────────────────────────────────
-info "=== Step 2/7: Installing apt dependencies ==="
+info "=== Step 2/6: Installing apt dependencies ==="
 
 # Core Python tooling
 sudo apt-get install -y \
@@ -87,21 +87,13 @@ sudo apt-get install -y \
     liblapack3 \
     liblapack-dev
 
-# Audio: PortAudio dev headers (needed to build the sounddevice pip wheel)
-# and libsndfile (for soundfile)
+# Audio: PortAudio dev headers and libsndfile (for soundfile)
+# PortAudio is kept for potential future use; libsndfile is required by soundfile
 sudo apt-get install -y \
     portaudio19-dev \
     libportaudio2 \
     libsndfile1 \
     libsndfile1-dev
-
-# TTS: espeak-ng (used by CaptionSpeaker when pyttsx3 is not installed)
-sudo apt-get install -y espeak-ng
-
-# I2C tools (for OLED display — smbus2 and luma.oled depend on kernel i2c support)
-sudo apt-get install -y \
-    i2c-tools \
-    python3-smbus
 
 # Useful extras
 sudo apt-get install -y \
@@ -111,7 +103,7 @@ sudo apt-get install -y \
 success "apt dependencies installed."
 
 # ── Step 3: Create Python virtual environment ──────────────────────────────────
-info "=== Step 3/7: Setting up Python virtual environment ==="
+info "=== Step 3/6: Setting up Python virtual environment ==="
 
 VENV_DIR="${REPO_DIR}/.venv"
 # Always (re)create the venv to guarantee --system-site-packages is set.
@@ -133,15 +125,13 @@ info "Activated .venv (python: $(which python3))"
 pip install --upgrade pip setuptools wheel
 
 # ── Step 4: Install Python pip packages ───────────────────────────────────────
-info "=== Step 4/7: Installing Python packages via pip ==="
+info "=== Step 4/6: Installing Python packages via pip ==="
 
 # Core project requirements (excluding opencv/dlib — those come from apt)
 # We install everything in requirements.txt and then patch out the apt-only ones.
 pip install \
     "numpy<2.0" \
     Pillow \
-    "luma.oled" \
-    sounddevice \
     soundfile \
     pyserial
 
@@ -154,9 +144,6 @@ pip install dlib
 info "Installing faster-whisper (large download — may take several minutes)..."
 pip install faster-whisper
 
-# TTS backend (pyttsx3 is preferred by CaptionSpeaker; espeak-ng is the system fallback)
-pip install pyttsx3
-
 # Summarization service client (needed by Pi to contact the remote Ollama service)
 pip install requests
 
@@ -166,7 +153,7 @@ pip install websocket-client zeroconf
 success "pip packages installed."
 
 # ── Step 5: Download dlib model files ─────────────────────────────────────────
-info "=== Step 5/7: Downloading dlib facial recognition models (~200MB) ==="
+info "=== Step 5/6: Downloading dlib facial recognition models (~200MB) ==="
 
 MODELS_DIR="${REPO_DIR}/facial_recognition/models"
 mkdir -p "${MODELS_DIR}"
@@ -199,7 +186,7 @@ download_model \
     "http://dlib.net/files/dlib_face_recognition_resnet_model_v1.dat.bz2"
 
 # ── Step 6: Configure UART for ESP32 audio ────────────────────────────────────
-info "=== Step 6/7: Configuring UART for ESP32 audio ==="
+info "=== Step 6/6: Configuring UART for ESP32 audio ==="
 
 # Detect Pi model — Pi 5 uses the RP1 I/O chip and needs different UART setup.
 PI_MODEL="$(cat /proc/device-tree/model 2>/dev/null || true)"
@@ -271,23 +258,6 @@ else
     success "udev serial rules already present."
 fi
 
-# ── Step 7: Enable I2C for OLED display ───────────────────────────────────────
-info "=== Step 7/7: Enabling I2C (OLED display) ==="
-
-if command -v raspi-config &>/dev/null; then
-    sudo raspi-config nonint do_i2c 0  # 0 = enable
-    success "I2C enabled via raspi-config."
-else
-    warn "raspi-config not found — enable I2C manually:"
-    warn "  sudo raspi-config → Interface Options → I2C → Yes"
-fi
-
-# Add user to i2c group if it exists
-if getent group i2c &>/dev/null; then
-    sudo usermod -aG i2c "${USER}"
-    success "Added ${USER} to i2c group."
-fi
-
 # ── Create required runtime directories ───────────────────────────────────────
 info "Creating runtime directories..."
 mkdir -p "${REPO_DIR}/data/recordings"
@@ -307,9 +277,7 @@ checks = [
     ("numpy",      "NumPy"),
     ("PIL",        "Pillow"),
     ("serial",     "pyserial"),
-    ("sounddevice","sounddevice"),
     ("soundfile",  "soundfile"),
-    ("luma.oled",  "luma.oled"),
 ]
 
 for mod, label in checks:
@@ -322,7 +290,6 @@ for mod, label in checks:
 
 optional = [
     ("faster_whisper", "faster-whisper"),
-    ("pyttsx3",        "pyttsx3"),
 ]
 for mod, label in optional:
     try:
@@ -346,8 +313,7 @@ echo -e "${GREEN}╚════════════════════
 echo ""
 echo "IMPORTANT — A reboot is required to apply:"
 echo "  • UART serial configuration"
-echo "  • I2C enable"
-echo "  • Group membership (dialout, tty, i2c)"
+echo "  • Group membership (dialout, tty)"
 echo ""
 echo "After rebooting, start the app with:"
 echo "  cd ${REPO_DIR}"
