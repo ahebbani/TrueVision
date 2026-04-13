@@ -49,7 +49,8 @@ Press `t` inside the app window to toggle transcription at runtime; press `q` to
 
 ## ESP32 runtime modes
 
-The ESP32 production firmware (`esp32_firmware/truevision_main.ino`) boots in `BOTH` mode by default — simultaneous audio transcription and facial recognition.
+The ESP32 production firmware announces its current switch-selected mode on boot.
+On the Pi, `BOTH` is only enabled when the TrueVision server is reachable; otherwise the Pi stays in a single local mode (`FACE` by default until a switch or override selects `AUDIO`).
 
 Recommended Pi-side command:
 
@@ -60,7 +61,7 @@ make run-esp32
 This runs:
 
 ```bash
-python main.py --audio-source esp32-serial --serial-baud 921600
+python main.py --serial-baud 921600
 ```
 
 If you want the Raspberry Pi to ignore firmware mode packets and force both subsystems on from the Pi side:
@@ -71,14 +72,14 @@ make run-esp32-force-both
 
 Direct Pi-side overrides:
 
-- `make run-audio` forces `AUDIO` mode on the ESP32 from the Pi side and uses ESP32 UART audio only.
-- `make run-face` forces `FACE` mode on the ESP32 with audio/transcription disabled.
+- `make run-audio` forces `AUDIO` mode on the ESP32 from the Pi side.
+- `make run-face` forces `FACE` mode on the ESP32 from the Pi side.
 
 These force-mode targets clear the override on shutdown. A normal `make run-esp32` leaves the hardware mode switch authoritative.
 
 The production board has:
 - A mode switch to select `AUDIO`-only or `FACE`-only after boot
-- A user button: single short press sends a meeting marker, double short press returns to `BOTH`, long press sends a diagnostics request
+- A user button: single short press sends a meeting marker, double short press requests `BOTH` (only effective while the server is reachable), long press sends a diagnostics request
 - Two debug LEDs for audio/hardware health and Pi link health
 
 ## Off-device LLM summarization

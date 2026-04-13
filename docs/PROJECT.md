@@ -329,7 +329,7 @@ When the mode changes, the ESP32 sends a `PKT_MODE_CHANGE` packet. The Pi reacts
 3. **`open_db()`** — Opens `data_access/faces.db`, ensuring all three tables exist. Returns a `sqlite3.Connection`.
 4. **`open_camera()`** — Opens the camera via Picamera2 (see [section 8](#8-facial-recognition)).
 5. **`Recognizer()`** — Builds the dlib detector, shape predictor, and face recognition model. Will raise `RuntimeError` if the `.dat` model files are absent under `facial_recognition/models/`.
-6. **Audio subsystem** — If `--audio` (default), imports `create_recorder`, `Transcriber`, `summarize_text` from `audio_analysis/transcription`. If the import fails (e.g., faster-whisper not installed), transcription is silently disabled.
+6. **Audio subsystem** — Imports `create_recorder`, `Transcriber`, `summarize_text` from `audio_analysis/transcription`. If the import fails (e.g., faster-whisper not installed), transcription is disabled.
 7. **ESP32 receiver init** — Calls `probe_esp32_uart_stream()` to check for sync bytes within a 1-second window. If confirmed (or forced), calls `get_shared_receiver()` to create and start the `ESP32SerialAudioReceiver` with the mode-change, marker, and diagnostic callbacks wired in. This is the only place where ESP32 callbacks are registered.
 8. **`Transcriber()`** — Lazily loads the Whisper model. The model runs entirely on CPU (`device="cpu"`, `compute_type="int8"`). The model size is configurable via `--whisper-model` (default `"tiny"`).
 9. **`LiveCaptioner()`** — Sets up the caption pipeline if transcription is enabled.
@@ -673,10 +673,10 @@ Run from the repository root. The Makefile auto-selects `.venv/bin/python` if pr
 | Target | Command | Description |
 |---|---|---|
 | `make run` | `python main.py` | Full system: face recognition + audio transcription |
-| `make run-face` | `python main.py --no-audio --force-mode face` | Face recognition only (no audio recording) |
-| `make run-audio` | `python main.py --audio-source esp32-serial --serial-baud 921600 --force-mode audio` | ESP32 audio only, face detection skipped |
-| `make run-esp32` | `python main.py --audio-source esp32-serial --serial-baud 921600` | Full system with ESP32 audio; mode switch honored |
-| `make run-esp32-force-both` | `python main.py --audio-source esp32-serial --no-mode-gate ...` | Ignore ESP32 mode packets; always run both |
+| `make run-face` | `python main.py --serial-baud 921600 --force-mode face` | Face recognition only |
+| `make run-audio` | `python main.py --serial-baud 921600 --force-mode audio` | ESP32 audio only, face detection skipped |
+| `make run-esp32` | `python main.py --serial-baud 921600` | Full system with ESP32 audio; mode switch honored |
+| `make run-esp32-force-both` | `python main.py --serial-baud 921600 --force-mode both` | Request BOTH; actual BOTH requires reachable server |
 | `make run-server` | `python -m server.app` | Start the TrueVision server |
 | `make run-server-dev` | `python -m server.app` (with reload) | Start server in development mode |
 | `make fetch-models` | `python facial_recognition/models/fetch_models.py` | Download dlib model files |
@@ -715,8 +715,6 @@ All flags can be set via environment variables (shown in parentheses) in additio
 
 | Flag | Default | Description |
 |---|---|---|
-| `--audio` / `--no-audio` | on | Enable/disable all audio recording and transcription |
-| `--audio-source` | `esp32-serial` | Audio source (ESP32 UART serial) |
 | `--serial-port` | `/dev/serial0` | UART device path |
 | `--serial-baud` | `921600` | UART baud rate |
 | `--whisper-model` | `tiny` | `tiny`, `base`, `small`, `medium`, `large-v2`, etc. |
@@ -728,8 +726,7 @@ All flags can be set via environment variables (shown in parentheses) in additio
 
 | Flag | Default | Description |
 |---|---|---|
-| `--no-mode-gate` | off | Ignore ESP32 mode packets; always run both face and audio |
-| `--force-mode` | (none) | Override to `audio`, `face`, or `both` regardless of ESP32 |
+| `--force-mode` | (none) | Override to `audio`, `face`, or `both`; `both` only becomes effective while the server is reachable |
 
 ### Summarization
 
@@ -839,7 +836,7 @@ Key tuning knobs:
 | Whisper model size | `--whisper-model` | `tiny` for real-time; `base` for better accuracy if latency is acceptable |
 | Caption interval | `--caption-interval` | 0.7 default; raise to 1.5–3.0 to reduce CPU contention with face detection |
 | Face detector | `--face-detector` | `hog` for speed (default), `cnn` for accuracy |
-| Audio disable | `--no-audio` | Skip transcription entirely if only face tracking is needed |
+| Face-only runtime | `--force-mode face` | Keep the system in face mode without starting audio sessions |
 | Overlay only | `--overlay-only` | Slightly reduces display compositing cost |
 | Camera resolution | `--camera-width 320 --camera-height 240` | Lower resolution significantly speeds up dlib HOG detection |
 

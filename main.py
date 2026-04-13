@@ -91,19 +91,14 @@ def parse_args():
     p.add_argument('--caption-interval', type=float, default=0.7, help='Seconds between caption updates')
     p.add_argument('--caption-max-words', type=int, default=30)
     p.add_argument('--caption-max-lines', type=int, default=2)
-    # Audio source flags
+        # ESP32 UART flags
     p.add_argument('--serial-port', default='/dev/serial0', help='Serial port for ESP32 audio (default: /dev/serial0)')
     p.add_argument('--serial-baud', type=int, default=921600, help='Baud rate for ESP32 serial')
-    p.add_argument('--no-mode-gate', action='store_true', default=False,
-                   help='Disable ESP32 mode-based face/audio gating — run both simultaneously. '
-                        'Use this when the hardware mode switch is not connected.')
     p.add_argument('--force-mode', choices=['audio', 'face', 'both'],
-                   help='Force runtime mode from the Pi side and ignore ESP32 mode packets.')
+                    help='Force runtime mode from the Pi side and ignore ESP32 mode packets. '
+                        'BOTH is only effective while the server connection is available.')
     # UI/overlay flags
     p.add_argument('--overlay-only', action='store_true', default=OVERLAY_ONLY_DEFAULT)
-    # Audio enable/disable flags
-    p.add_argument('--audio', dest='audio', action='store_true', default=True, help='Enable audio recording/transcription (default)')
-    p.add_argument('--no-audio', dest='audio', action='store_false', help='Disable audio recording/transcription for performance')
     # Summary flags
     p.add_argument('--summary-async', action='store_true', help='Compute meeting summaries in a background thread')
     p.add_argument('--summary-max-sentences', type=int, default=1)
@@ -134,10 +129,7 @@ def recognize_face():
         print("ERROR: Could not open camera. Ensure Picamera2 is installed and the RPi camera is connected.")
         return
     print("Press 'q' to quit.")
-    if args.audio:
-        print("Press 't' to toggle transcription on/off (default: ON).")
-    else:
-        print("Audio disabled (--no-audio). Transcription is OFF.")
+    print("Press 't' to toggle transcription on/off (default: ON).")
 
     presence_state = {}
     last_detected_ts = {}
@@ -154,26 +146,23 @@ def recognize_face():
         verbose=bool(getattr(args, 'template_verbose', False)),
     ))
 
-    transcription_enabled = args.audio
+    transcription_enabled = True
     active_recorders = {}
     active_meetings = {}
     create_recorder = None
     Transcriber = None
     def summarize_text(txt: str, max_sentences: int = 5) -> str:
         return ''
-    if transcription_enabled:
-        try:
-            from audio_analysis.transcription import (
-                create_recorder as _create_recorder,
-                Transcriber as _Transcriber,
-                summarize_text as _summarize_text,
-            )
-            create_recorder, Transcriber, summarize_text = _create_recorder, _Transcriber, _summarize_text
-        except Exception as e:
-            print(f"WARNING: Transcription modules unavailable ({e}). Transcription disabled.")
-            transcription_enabled = False
-    else:
-        print("INFO: Skipping audio subsystem initialization (disabled by flag).")
+    try:
+        from audio_analysis.transcription import (
+            create_recorder as _create_recorder,
+            Transcriber as _Transcriber,
+            summarize_text as _summarize_text,
+        )
+        create_recorder, Transcriber, summarize_text = _create_recorder, _Transcriber, _summarize_text
+    except Exception as e:
+        print(f"WARNING: Transcription modules unavailable ({e}). Transcription disabled.")
+        transcription_enabled = False
 
     # ── ESP32 mode switch and marker integration ──────────────────────────────
     # current_mode is a one-element list so the closures below can mutate it.
@@ -183,7 +172,9 @@ def recognize_face():
         'face': MODE_FACE,
         'both': MODE_BOTH,
     }.get(args.force_mode)
+    _server_offload_active = False  # True when server is handling audio
     current_mode = [forced_mode if forced_mode is not None else MODE_BOTH]
+    last_single_mode = [forced_mode if forced_mode in (MODE_AUDIO, MODE_FACE) else MODE_FACE]
     AUDIO_SESSION_KEY = -1
     # Thread-safe queue for marker events (PKT_MARKER from ESP32 button).
     # The main loop drains the queue and appends [MARKER HH:MM:SS] to the
@@ -197,12 +188,36 @@ def recognize_face():
             return "AUDIO"
         return "BOTH"
 
+    def _effective_mode(mode_byte: int) -> int:
+        if mode_byte in (MODE_AUDIO, MODE_FACE):
+            return mode_byte
+        if _server_offload_active:
+            return MODE_BOTH
+        return last_single_mode[0]
+
+    def _set_requested_mode(mode_byte: int, *, source: str) -> None:
+        if current_mode[0] == mode_byte:
+            return
+        current_mode[0] = mode_byte
+        if mode_byte in (MODE_AUDIO, MODE_FACE):
+            last_single_mode[0] = mode_byte
+            print(f"{source}: Mode changed to {_mode_label(mode_byte)}")
+            return
+
+        effective_mode = _effective_mode(mode_byte)
+        if effective_mode == MODE_BOTH:
+            print(f"{source}: Mode changed to BOTH")
+        else:
+            print(
+                f"{source}: Mode changed to BOTH, but server is unavailable; "
+                f"using {_mode_label(effective_mode)}"
+            )
+
     def _on_mode_change(mode_byte: int) -> None:
         if forced_mode is not None:
             print(f"ESP32: Mode packet {_mode_label(mode_byte)} ignored (forced {_mode_label(forced_mode)})")
             return
-        current_mode[0] = mode_byte
-        print(f"ESP32: Mode changed to {_mode_label(mode_byte)}")
+        _set_requested_mode(mode_byte, source="ESP32")
 
     def _on_marker() -> None:
         _marker_queue.put(datetime.now().strftime("%H:%M:%S"))
@@ -230,13 +245,13 @@ def recognize_face():
                 on_marker=_on_marker,
                 on_diag_request=_on_diag_request,
             )
-                if forced_mode is not None:
-                    _esp32_receiver.force_mode(forced_mode)
-                    print(f"ESP32: Forced mode {_mode_label(forced_mode)} sent to firmware")
-                else:
-                    _esp32_receiver.clear_forced_mode()
-        except Exception as _recv_err:
-            print(f"WARNING: Could not initialise ESP32 receiver for callbacks: {_recv_err}")
+            if forced_mode is not None:
+                _esp32_receiver.force_mode(forced_mode)
+                print(f"ESP32: Forced mode {_mode_label(forced_mode)} sent to firmware")
+            else:
+                _esp32_receiver.clear_forced_mode()
+    except Exception as _recv_err:
+        print(f"WARNING: Could not initialise ESP32 receiver for callbacks: {_recv_err}")
 
     transcriber: Optional[object] = None
     if transcription_enabled and Transcriber is not None:
@@ -258,7 +273,6 @@ def recognize_face():
     # ── Server connection for offloaded transcription ─────────────────────
     server_conn = None
     audio_forwarder = None
-    _server_offload_active = False  # True when server is handling audio
     _last_server_check = 0.0
 
     if not getattr(args, 'no_server', False):
@@ -324,7 +338,7 @@ def recognize_face():
             audio_path_pending = rec.start(RECORDINGS_DIR, label_prefix)
         except Exception as _rec_err:
             print(f"WARNING: Could not start audio recorder ({_rec_err}). "
-                  f"Transcription disabled. Use --no-audio to suppress this warning.")
+                f"Transcription disabled for this run.")
             transcription_enabled = False
             return
 
@@ -621,9 +635,10 @@ def recognize_face():
     applied_mode = None
 
     while True:
-        if applied_mode != current_mode[0]:
-            _apply_mode_transition(current_mode[0])
-            applied_mode = current_mode[0]
+        effective_mode = _effective_mode(current_mode[0])
+        if applied_mode != effective_mode:
+            _apply_mode_transition(effective_mode)
+            applied_mode = effective_mode
 
         # ── Periodic server availability check ────────────────────────────
         if server_conn is not None:
@@ -675,8 +690,8 @@ def recognize_face():
         recognized_ids_in_frame = set()
         # Skip face detection only when the ESP32 is connected AND in AUDIO-only mode,
         # UNLESS the server is handling audio (then we can do both).
-        _mode_gate_active = (forced_mode is not None) or ((_esp32_receiver is not None) and not getattr(args, 'no_mode_gate', False))
-        _skip_face = _mode_gate_active and (current_mode[0] == MODE_AUDIO) and not _server_offload_active
+        _mode_gate_active = (forced_mode is not None) or (_esp32_receiver is not None)
+        _skip_face = _mode_gate_active and (effective_mode == MODE_AUDIO)
         faces_info = [] if _skip_face else recog.detect_and_recognize(conn, frame)
         if not hasattr(recognize_face, "_prev_summaries"):
             recognize_face._prev_summaries = {}
@@ -733,7 +748,7 @@ def recognize_face():
                     if recognized_seen_count is not None:
                         recognized_seen_count += 1
                     recognized_last_seen_str = "now"
-                    mode_allows_recording = (not _mode_gate_active) or (current_mode[0] != MODE_FACE)
+                    mode_allows_recording = (not _mode_gate_active) or (effective_mode != MODE_FACE)
                     if transcription_enabled and recognized_id not in active_recorders and mode_allows_recording:
                         _start_session(
                             int(recognized_id),

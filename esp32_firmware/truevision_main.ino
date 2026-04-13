@@ -74,7 +74,8 @@
  * ── Button (GPIO 11) ───────────────────────────────────────────────────────
  *   Single short press   Send MARKER packet → Pi inserts [MARKER HH:MM:SS]
  *                        into the active meeting transcript
- *   Double short press   Force BOTH mode (audio + face together)
+ *   Double short press   Request BOTH mode (Pi only honors it while the
+ *                        server connection is available)
  *   Long press  (≥ 3 s)  Send DIAG_REQUEST → Pi replies with PI_STATUS even
  *                        if its OLED is up; both LEDs flash 3× alternately
  *                        to confirm receipt of ACK
@@ -271,6 +272,11 @@ static void set_mode(uint8_t new_mode) {
     if (new_mode == s_mode) return;
     s_mode = new_mode;
     uint8_t payload = new_mode;
+    send_control_packet(PKT_MODE_CHANGE, &payload, 1);
+}
+
+static void announce_mode(uint8_t mode) {
+    uint8_t payload = mode;
     send_control_packet(PKT_MODE_CHANGE, &payload, 1);
 }
 
@@ -482,6 +488,7 @@ static void task_uart_rx(void *) {
             switch (pkt_type) {
                 case PKT_HEARTBEAT:
                     s_hb_last_ms = millis();
+                    announce_mode(s_mode);
                     break;
 
                 case PKT_FORCE_MODE:
@@ -761,6 +768,10 @@ void setup() {
         // Supervisor will show LED_FAST_4HZ on LED1. Tasks still run so the
         // Pi link stays active.
     }
+
+    // Announce the startup mode so the Pi does not assume BOTH before the
+    // first manual switch change or override packet.
+    announce_mode(s_mode);
 
     // Spawn FreeRTOS tasks
     // AudioTX and UART_RX share Core 1 (leaves Core 0 for Supervisor + system)

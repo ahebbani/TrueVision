@@ -27,11 +27,11 @@ endif
 
 help:
 	@echo "Targets:"
-	@echo "  run                 - Run full system (video + audio)"
-	@echo "  run-audio           - Force audio-only mode with ESP32 UART audio"
-	@echo "  run-face            - Force face-only mode (no audio/transcription)"
+	@echo "  run                 - Run full system; mode switch is honored, BOTH needs server"
+	@echo "  run-audio           - Force audio-only mode"
+	@echo "  run-face            - Force face-only mode"
 	@echo "  run-esp32           - Run with ESP32 UART audio; firmware mode packets are honored"
-	@echo "  run-esp32-force-both - Ignore firmware mode packets and force audio + face together"
+	@echo "  run-esp32-force-both - Request BOTH; actual BOTH requires reachable server"
 	@echo "  run-server          - Start TrueVision server (transcription + summarization)"
 	@echo "  run-server-dev      - Start server with auto-reload (development)"
 	@echo "  server-status       - Check server health endpoint"
@@ -44,19 +44,22 @@ help:
 
 # Run commands to test all or parts of the codebase
 run:
+	$(PY) main.py --overlay-only
+
+run-test:
 	$(PY) main.py
 
 run-audio:
-	$(PY) main.py --audio-source esp32-serial --serial-baud 921600 --force-mode audio
+	$(PY) main.py --serial-baud 921600 --force-mode audio
 
 run-face:
-	$(PY) main.py --no-audio --force-mode face
+	$(PY) main.py --serial-baud 921600 --force-mode face
 
 run-esp32:
-	$(PY) main.py --audio-source esp32-serial --serial-baud 921600
+	$(PY) main.py --serial-baud 921600
 
 run-esp32-force-both:
-	$(PY) main.py --audio-source esp32-serial --serial-baud 921600 --force-mode both
+	$(PY) main.py --serial-baud 921600 --force-mode both
 
 fetch-models:
 	$(PY) facial_recognition/models/fetch_models.py

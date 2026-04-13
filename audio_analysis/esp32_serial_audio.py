@@ -80,7 +80,8 @@ MODE_BOTH  = 0x02
 def probe_esp32_uart_stream(port: str = '/dev/serial0', baud_rate: int = 921600, timeout_sec: float = 1.0) -> bool:
     """Return True if the ESP32 audio stream appears present on the UART.
 
-    This is a best-effort probe used for auto-selecting audio source.
+    This is a best-effort probe used to confirm that the ESP32 UART stream
+    is present before starting the receiver.
     It looks for the framing sync bytes 0xAA 0x55 in incoming data.
     """
     if serial is None:

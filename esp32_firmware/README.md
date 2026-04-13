@@ -14,9 +14,9 @@ Connect your I2S microphone to the ESP32:
 
 | I2S Mic Pin | ESP32 Pin | Description |
 |-------------|-----------|-------------|
-| SCK (BCLK)  | GPIO 14   | Serial Clock |
-| WS (LRCLK)  | GPIO 15   | Word Select (Left/Right) |
-| SD (DOUT)   | GPIO 32   | Serial Data |
+| SCK (BCLK)  | GPIO 16   | Serial Clock |
+| WS (LRCLK)  | GPIO 17   | Word Select (Left/Right) |
+| SD (DOUT)   | GPIO 5    | Serial Data |
 | VDD         | 3.3V      | Power |
 | GND         | GND       | Ground |
 
@@ -32,7 +32,7 @@ Connect ESP32 to Raspberry Pi:
 | ESP32 Pin | Pi Pin (Physical) | Pi GPIO | Description |
 |-----------|-------------------|---------|-------------|
 | GPIO 1 (TX) | Pin 10 | GPIO 15 | ESP32 transmits audio |
-| GPIO 3 (RX) | Pin 8  | GPIO 14 | (Optional - not used) |
+| GPIO 3 (RX) | Pin 8  | GPIO 14 | Pi sends heartbeat and mode override packets |
 | GND | Pin 6, 9, 14, 20, 25, 30, 34, or 39 | GND | Common ground |
 
 ## Installation Instructions
@@ -98,7 +98,7 @@ audio_buffer[i] = (int16_t)(i2s_read_buffer[i] >> 14);
 - `>> 14` - Default (works for most INMP441)
 - `>> 16` - Quieter (for mics that use upper bits)
 
-**To adjust:** Edit line ~135 in the sketch and re-upload.
+**To adjust:** change `#define SAMPLE_SHIFT 14` in `truevision_main.ino` and re-upload.
 
 ### 5. Test the Setup
 
@@ -150,7 +150,9 @@ For Pi-side overrides without touching the ESP32 switch state:
 
 ### Mode / button behavior issues
 - Confirm the mode switch is wired to GPIO 35/36 and the button to GPIO 11
-- If you always want the Pi to run both subsystems regardless of firmware mode packets, use `make run-esp32-force-both`
+- The ESP32 re-advertises its current effective mode whenever it receives a Pi heartbeat, so Pi/ESP32 startup order no longer matters
+- `BOTH` is only honored while the Pi has a live TrueVision server connection for offloaded audio
+- If you want to request `BOTH` from the Pi side, use `make run-esp32-force-both` with `TRUEVISION_SERVER_URL` set to a reachable server
 
 ### Garbled Serial Monitor Output
 - This is normal when streaming binary audio data
@@ -163,9 +165,9 @@ If you need different pins (e.g., conflicts with other peripherals), edit these 
 
 ```cpp
 // I2S Pins
-#define I2S_SCK_PIN       14  // Change to your SCK pin
-#define I2S_WS_PIN        15  // Change to your WS pin
-#define I2S_SD_PIN        32  // Change to your SD pin
+#define I2S_SCK_PIN       16  // Change to your SCK pin
+#define I2S_WS_PIN        17  // Change to your WS pin
+#define I2S_SD_PIN         5  // Change to your SD pin
 ```
 
 **Available GPIO pins for I2S on ESP32:**
@@ -183,7 +185,7 @@ If you need different pins (e.g., conflicts with other peripherals), edit these 
 
 ### Change Sample Rate
 
-Edit line ~30:
+Edit the `I2S_SAMPLE_RATE` define near the top of `truevision_main.ino`:
 ```cpp
 #define I2S_SAMPLE_RATE   16000  // Try 8000 or 44100
 ```
@@ -195,7 +197,7 @@ SAMPLE_RATE = 16000  # Match ESP32 setting
 
 ### Change Packet Size
 
-Edit line ~39:
+Edit the `BUFFER_SIZE` define near the top of `truevision_main.ino`:
 ```cpp
 #define BUFFER_SIZE       512  // Try 256 (faster) or 1024 (fewer packets)
 ```
