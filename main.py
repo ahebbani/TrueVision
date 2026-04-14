@@ -163,7 +163,8 @@ def recognize_face():
 
     # ── ESP32 mode switch and marker integration ──────────────────────────────
     # current_mode is a one-element list so the closures below can mutate it.
-    from audio_analysis.esp32_serial_audio import MODE_AUDIO, MODE_FACE, MODE_BOTH
+    from audio_analysis.esp32_serial_audio import MODE_AUDIO, MODE_FACE
+    MODE_BOTH = 0x02  # Pi-side only; ESP32 no longer sends this
     forced_mode = {
         'audio': MODE_AUDIO,
         'face': MODE_FACE,
@@ -222,9 +223,6 @@ def recognize_face():
     def _on_marker() -> None:
         _marker_queue.put(datetime.now().strftime("%H:%M:%S"))
 
-    def _on_diag_request() -> None:
-        print("ESP32: DIAG_REQUEST received; status pushed to ESP32.")
-
     # Wire up callbacks on the shared receiver for ESP32 mode/marker events.
     _esp32_receiver = None
     try:
@@ -234,13 +232,9 @@ def recognize_face():
             serial_baud=args.serial_baud,
             on_mode_change=_on_mode_change,
             on_marker=_on_marker,
-            on_diag_request=_on_diag_request,
         )
         if forced_mode is not None:
-            _esp32_receiver.force_mode(forced_mode)
-            print(f"ESP32: Forced mode {_mode_label(forced_mode)} sent to firmware")
-        else:
-            _esp32_receiver.clear_forced_mode()
+            print(f"ESP32: Pi-side forced mode {_mode_label(forced_mode)}")
         print(f"ESP32: Receiver initialised on {args.serial_port}")
     except Exception as _recv_err:
         print(f"WARNING: ESP32 not detected on {args.serial_port} — running without ESP32 integration")
@@ -823,13 +817,6 @@ def recognize_face():
             break
 
     try:
-        if _esp32_receiver is not None and forced_mode is not None:
-            try:
-                _esp32_receiver.clear_forced_mode()
-                print("ESP32: Cleared forced mode override")
-            except Exception as _clear_err:
-                print(f"WARNING: Could not clear ESP32 forced mode: {_clear_err}")
-        
         cap.release()
     except Exception:
         pass

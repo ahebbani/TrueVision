@@ -126,7 +126,7 @@ def get_shared_receiver(
 
     Extra kwargs are forwarded to ESP32SerialAudioReceiver.__init__ only when
     creating a new instance — they are silently ignored if the receiver is
-    already running.  Pass on_mode_change, on_marker, and on_diag_request
+    already running.  Pass on_mode_change and on_marker
     here when initialising callbacks from main.py.
     """
     if ESP32SerialAudioReceiver is None:
@@ -146,7 +146,7 @@ def get_shared_receiver(
             _shared_serial_receivers[key] = receiver
         else:
             # Apply callbacks if the caller provided them and they are not yet set
-            for attr in ('on_mode_change', 'on_marker', 'on_diag_request'):
+            for attr in ('on_mode_change', 'on_marker'):
                 if attr in kwargs and getattr(receiver, attr, None) is None:
                     setattr(receiver, attr, kwargs[attr])
             if not receiver.is_receiving():
