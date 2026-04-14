@@ -134,8 +134,7 @@ def recognize_face():
     last_detected_ts = {}
     ABSENCE_GRACE_SEC = args.absence_grace_sec
 
-    # Recognizer
-    recog = Recognizer(RecognizerConfig(
+    recognizer_cfg = RecognizerConfig(
         models_dir=MODELS_DIR,
         detector_mode=args.face_detector,
         match_threshold=args.match_threshold,
@@ -143,7 +142,20 @@ def recognize_face():
         diversity_min_dist=args.diversity_min_dist,
         add_cooldown_sec=args.add_cooldown_sec,
         verbose=bool(getattr(args, 'template_verbose', False)),
-    ))
+    )
+    recog: Optional[Recognizer] = None
+
+    def _get_recognizer() -> Optional[Recognizer]:
+        nonlocal recog
+        if recog is not None:
+            return recog
+        try:
+            print("Face recognition: Initializing models")
+            recog = Recognizer(recognizer_cfg)
+            return recog
+        except Exception as e:
+            print(f"WARNING: Face recognition unavailable ({e}).")
+            return None
 
     active_recorders = {}
     active_meetings = {}
@@ -666,96 +678,96 @@ def recognize_face():
                 break
 
         recognized_ids_in_frame = set()
-        # Skip face detection entirely in AUDIO-only mode.
-        _skip_face = (effective_mode == MODE_AUDIO)
-        faces_info = [] if _skip_face else recog.detect_and_recognize(conn, frame)
-        if not hasattr(recognize_face, "_prev_summaries"):
-            recognize_face._prev_summaries = {}
-        prev_summaries = recognize_face._prev_summaries  # type: ignore[attr-defined]
-        for info in faces_info:
-            x, y, w, h = info.rect
-            recognized_id = info.person_id
-            recognized_name = info.name
-            recognized_seen_count = info.seen_count
-            recognized_last_seen_str = info.last_seen_at
+        if effective_mode != MODE_AUDIO:
+            recognizer = _get_recognizer()
+            faces_info = recognizer.detect_and_recognize(conn, frame) if recognizer is not None else []
+            if not hasattr(recognize_face, "_prev_summaries"):
+                recognize_face._prev_summaries = {}
+            prev_summaries = recognize_face._prev_summaries  # type: ignore[attr-defined]
 
-            if recognized_id is not None:
-                now_ts = time.time()
-                prev_state = presence_state.get(recognized_id, 'absent')
-                recognized_ids_in_frame.add(recognized_id)
-                last_detected_ts[recognized_id] = now_ts
+            for info in faces_info:
+                x, y, w, h = info.rect
+                recognized_id = info.person_id
+                recognized_name = info.name
+                recognized_seen_count = info.seen_count
+                recognized_last_seen_str = info.last_seen_at
 
-                if prev_state != 'present':
-                    # Fetch previous-conversation summary for display.
-                    prev_summary = ""
-                    try:
-                        row = get_latest_finished_meeting(conn, recognized_id)
-                        if row:
-                            prev_mid, _ended_at, prev_transcript, prev_summary_db = row
-                            try:
-                                from audio_analysis.transcription import summarize_one_sentence
+                if recognized_id is not None:
+                    now_ts = time.time()
+                    prev_state = presence_state.get(recognized_id, 'absent')
+                    recognized_ids_in_frame.add(recognized_id)
+                    last_detected_ts[recognized_id] = now_ts
 
-                                if (prev_summary_db or "").strip():
-                                    prev_summary = summarize_one_sentence(
-                                        str(prev_summary_db),
-                                        max_chars=int(getattr(args, "prev_summary_max_chars", 140)),
-                                    )
-                                elif prev_transcript:
-                                    prev_summary = summarize_one_sentence(
-                                        prev_transcript,
-                                        max_chars=int(getattr(args, "prev_summary_max_chars", 140)),
-                                    )
-                                    if prev_summary:
-                                        cursor.execute(
-                                            "UPDATE meetings SET summary = ? WHERE id = ?",
-                                            (prev_summary, int(prev_mid)),
-                                        )
-                                        conn.commit()
-                            except Exception:
-                                prev_summary = (prev_summary_db or "").strip()
-                            if row and not (prev_summary or "").strip():
-                                prev_summary = "no summary available"
-                    except Exception:
+                    if prev_state != 'present':
+                        # Fetch previous-conversation summary for display.
                         prev_summary = ""
-                    prev_summaries[int(recognized_id)] = prev_summary
+                        try:
+                            row = get_latest_finished_meeting(conn, recognized_id)
+                            if row:
+                                prev_mid, _ended_at, prev_transcript, prev_summary_db = row
+                                try:
+                                    from audio_analysis.transcription import summarize_one_sentence
 
-                    recog.update_seen(conn, recognized_id)
-                    presence_state[recognized_id] = 'present'
-                    if recognized_seen_count is not None:
-                        recognized_seen_count += 1
-                    recognized_last_seen_str = "now"
-                    if create_recorder is not None and recognized_id not in active_recorders and effective_mode in (MODE_AUDIO, MODE_BOTH):
-                        _start_session(
-                            int(recognized_id),
-                            person_id=int(recognized_id),
-                            label_prefix=f"person{recognized_id}",
-                        )
-                else:
-                    presence_state[recognized_id] = 'present'
+                                    if (prev_summary_db or "").strip():
+                                        prev_summary = summarize_one_sentence(
+                                            str(prev_summary_db),
+                                            max_chars=int(getattr(args, "prev_summary_max_chars", 140)),
+                                        )
+                                    elif prev_transcript:
+                                        prev_summary = summarize_one_sentence(
+                                            prev_transcript,
+                                            max_chars=int(getattr(args, "prev_summary_max_chars", 140)),
+                                        )
+                                        if prev_summary:
+                                            cursor.execute(
+                                                "UPDATE meetings SET summary = ? WHERE id = ?",
+                                                (prev_summary, int(prev_mid)),
+                                            )
+                                            conn.commit()
+                                except Exception:
+                                    prev_summary = (prev_summary_db or "").strip()
+                                if row and not (prev_summary or "").strip():
+                                    prev_summary = "no summary available"
+                        except Exception:
+                            prev_summary = ""
+                        prev_summaries[int(recognized_id)] = prev_summary
 
-                # Adaptive template add
-                if recognized_id is not None and info.embedding is not None:
-                    if recog.maybe_add_embedding(conn, recognized_id, info.embedding, info.quality):
-                        prune_embeddings_if_needed(conn, recognized_id, MAX_TEMPLATES_PER_PERSON)
+                        if recognizer is not None:
+                            recognizer.update_seen(conn, recognized_id)
+                        presence_state[recognized_id] = 'present'
+                        if recognized_seen_count is not None:
+                            recognized_seen_count += 1
+                        recognized_last_seen_str = "now"
+                        if create_recorder is not None and recognized_id not in active_recorders and effective_mode == MODE_BOTH:
+                            _start_session(
+                                int(recognized_id),
+                                person_id=int(recognized_id),
+                                label_prefix=f"person{recognized_id}",
+                            )
+                    else:
+                        presence_state[recognized_id] = 'present'
 
-            cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-            label = recognized_name
-            if recognized_id is not None and recognized_seen_count is not None:
-                label = f"{recognized_name} (seen {recognized_seen_count})"
-            cv2.putText(display_frame, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            if recognized_id is not None:
-                last_label = f"Last: {recognized_last_seen_str if recognized_last_seen_str else '—'}"
-                cv2.putText(display_frame, last_label, (x, y+15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-                prev_summary = prev_summaries.get(int(recognized_id), "")
-                if prev_summary:
-                    # Keep overlay compact.
-                    prev_line = prev_summary
-                    max_chars = 48
-                    if len(prev_line) > max_chars:
-                        prev_line = prev_line[: max_chars - 1].rstrip() + "…"
-                    cv2.putText(display_frame, f"Prev: {prev_line}", (x, y+30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-                if recognized_id in active_recorders and effective_mode == MODE_BOTH:
-                    cv2.putText(display_frame, "REC", (x, y+45), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                    if recognizer is not None and info.embedding is not None:
+                        if recognizer.maybe_add_embedding(conn, recognized_id, info.embedding, info.quality):
+                            prune_embeddings_if_needed(conn, recognized_id, MAX_TEMPLATES_PER_PERSON)
+
+                cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                label = recognized_name
+                if recognized_id is not None and recognized_seen_count is not None:
+                    label = f"{recognized_name} (seen {recognized_seen_count})"
+                cv2.putText(display_frame, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                if recognized_id is not None:
+                    last_label = f"Last: {recognized_last_seen_str if recognized_last_seen_str else '—'}"
+                    cv2.putText(display_frame, last_label, (x, y+15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                    prev_summary = prev_summaries.get(int(recognized_id), "")
+                    if prev_summary:
+                        prev_line = prev_summary
+                        max_chars = 48
+                        if len(prev_line) > max_chars:
+                            prev_line = prev_line[: max_chars - 1].rstrip() + "…"
+                        cv2.putText(display_frame, f"Prev: {prev_line}", (x, y+30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+                    if recognized_id in active_recorders and effective_mode == MODE_BOTH:
+                        cv2.putText(display_frame, "REC", (x, y+45), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
         # Live transcription overlay (closed captioning)
         caption = None
@@ -824,6 +836,11 @@ def recognize_face():
     try:
         if audio_forwarder is not None:
             audio_forwarder.stop()
+    except Exception:
+        pass
+    try:
+        if captioner is not None:
+            captioner.stop()
     except Exception:
         pass
     try:

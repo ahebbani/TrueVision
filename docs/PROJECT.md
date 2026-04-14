@@ -98,7 +98,7 @@ main.py
   ├── facial_recognition/recognizer.py    ← dlib detect + embed + match
   ├── audio_analysis/esp32_serial_audio.py ← UART framing, ring buffer
   ├── audio_analysis/transcription.py     ← Transcriber, summaries
-  ├── audio_analysis/live_caption.py      ← periodic Whisper, caption update
+  ├── audio_analysis/live_caption.py      ← async local caption worker
   ├── data_access/db.py                   ← SQLite open, schema, helpers
   └── summarization/remote_client.py      ← HTTP client for TrueVision server
 
@@ -108,7 +108,7 @@ server/app.py   ← TrueVision server (FastAPI, transcription + summarization of
   └── summarization/text.py               ← clamping + sentence helpers
 ```
 
-The entire pipeline is single-process on the Pi. No message queues or IPC beyond the single serial port. The ESP32 receiver, heartbeat sender, and Whisper transcription each run in daemon background threads; the main Python thread owns the camera loop and reacts to their results.
+The entire pipeline is single-process on the Pi. No message queues or IPC beyond the single serial port. The ESP32 receiver and local caption worker run in daemon background threads; the main Python thread owns the camera loop and reacts to their results.
 
 ---
 
@@ -158,7 +158,7 @@ TrueVision/
 │   └── discovery.py                 mDNS service discovery
 │
 ├── esp32_firmware/
-│   └── truevision_main.ino          Production firmware (full protocol)
+│   └── truevision_main.ino          Simplified TX-only firmware (audio + mode packets)
 │
 ├── scripts/
 │   ├── install_truevision_systemd.sh        Pi systemd service installer

@@ -45,11 +45,11 @@ From repo root:
 python main.py
 ```
 
-Press `t` inside the app window to toggle transcription at runtime; press `q` to quit.
+Press `q` to quit.
 
 ## ESP32 runtime modes
 
-The ESP32 production firmware announces its current switch-selected mode on boot.
+The current ESP32 firmware is a simple TX-only sender: it streams audio continuously and sends `MODE_CHANGE` packets when the button state changes.
 On the Pi, `BOTH` is only enabled when the TrueVision server is reachable; otherwise the Pi stays in a single local mode (`FACE` by default until a switch or override selects `AUDIO`).
 
 Recommended Pi-side command:
@@ -64,7 +64,7 @@ This runs:
 python main.py --serial-baud 921600
 ```
 
-If you want the Raspberry Pi to ignore firmware mode packets and force both subsystems on from the Pi side:
+If you want the Raspberry Pi to ignore firmware mode packets and force both subsystems from the Pi side:
 
 ```bash
 make run-esp32-force-both
@@ -72,15 +72,14 @@ make run-esp32-force-both
 
 Direct Pi-side overrides:
 
-- `make run-audio` forces `AUDIO` mode on the ESP32 from the Pi side.
-- `make run-face` forces `FACE` mode on the ESP32 from the Pi side.
+- `make run-audio` forces the Pi into `AUDIO` mode. The camera feed stays up for captions, but facial recognition is skipped.
+- `make run-face` forces the Pi into `FACE` mode.
 
-These force-mode targets clear the override on shutdown. A normal `make run-esp32` leaves the hardware mode switch authoritative.
+These overrides are Pi-side runtime settings. A normal `make run-esp32` leaves the firmware mode packets authoritative.
 
-The production board has:
-- A mode switch to select `AUDIO`-only or `FACE`-only after boot
-- A user button: single short press sends a meeting marker, double short press requests `BOTH` (only effective while the server is reachable), long press sends a diagnostics request
-- Two debug LEDs for audio/hardware health and Pi link health
+The simplified sender firmware in this branch supports:
+- Continuous UART audio streaming
+- A button-driven `AUDIO`/`FACE` mode announcement
 
 ## Off-device LLM summarization
 

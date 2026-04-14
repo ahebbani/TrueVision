@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import queue
+import threading
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 
 @dataclass
@@ -18,18 +20,81 @@ class LiveCaptioner:
         self.cfg = cfg
         self._last_update: Dict[int, float] = {}
         self._captions: Dict[int, str] = {}
+        self._job_queue: queue.Queue = queue.Queue()
+        self._result_queue: queue.Queue = queue.Queue()
+        self._generation: Dict[int, int] = {}
+        self._inflight: set[int] = set()
+        self._stop_event = threading.Event()
+        self._worker = threading.Thread(
+            target=self._worker_loop,
+            daemon=True,
+            name="live-caption-worker",
+        )
+        self._worker.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._job_queue.put(None)
+        if self._worker.is_alive():
+            self._worker.join(timeout=1.0)
 
     def clear(self, pid: int) -> None:
         self._last_update.pop(pid, None)
         self._captions.pop(pid, None)
+        self._generation[pid] = self._generation.get(pid, 0) + 1
+        self._inflight.discard(pid)
 
     def clear_all(self) -> None:
         self._last_update.clear()
         self._captions.clear()
+        for pid in list(self._generation.keys()):
+            self._generation[pid] = self._generation.get(pid, 0) + 1
+        self._inflight.clear()
+
+    def _worker_loop(self) -> None:
+        while not self._stop_event.is_set():
+            job = self._job_queue.get()
+            if job is None:
+                continue
+
+            pid, generation, audio_path, meeting_id = job
+            try:
+                text_live = self.transcriber.transcribe(audio_path)
+                words = (text_live or '').strip().split()
+                tail_txt = ' '.join(words[-self.cfg.max_words:])
+                self._result_queue.put((pid, generation, meeting_id, text_live, tail_txt, None))
+            except Exception as e:
+                self._result_queue.put((pid, generation, meeting_id, None, None, e))
+
+    def _drain_results(self, cursor) -> None:
+        while True:
+            try:
+                pid, generation, meeting_id, text_live, tail_txt, err = self._result_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            if self._generation.get(pid, 0) != generation:
+                continue
+
+            self._inflight.discard(pid)
+
+            if err is not None:
+                print(f"LiveCaptioner: transcription error for pid={pid}: {err}")
+                continue
+
+            self._captions[pid] = tail_txt or ''
+            if meeting_id is not None and text_live:
+                cursor.execute(
+                    "UPDATE meetings SET transcript = ? WHERE id = ?",
+                    (text_live, meeting_id),
+                )
 
     def update(self, active_recorders: Dict[int, object], active_meetings: Dict[int, int], cursor) -> None:
+        self._drain_results(cursor)
         now = time.time()
         for pid, rec in list(active_recorders.items()):
+            if pid in self._inflight:
+                continue
             audio_path = getattr(rec, 'audio_path', None)
             if not audio_path:
                 # No active file yet; skip
@@ -52,21 +117,9 @@ class LiveCaptioner:
             # Confirm the audio file actually exists before handing to Whisper.
             if not os.path.exists(audio_path):
                 continue
-            try:
-                text_live = self.transcriber.transcribe(audio_path)
-                self._last_update[pid] = now
-                words = (text_live or '').strip().split()
-                tail_txt = ' '.join(words[-self.cfg.max_words:])
-                self._captions[pid] = tail_txt
-                mid = active_meetings.get(pid)
-                if mid is not None and text_live:
-                    cursor.execute(
-                        "UPDATE meetings SET transcript = ? WHERE id = ?",
-                        (text_live, mid),
-                    )
-            except Exception as e:
-                # Surface issues to stdout to aid debugging
-                print(f"LiveCaptioner: transcription error for pid={pid}, path={audio_path}: {e}")
+            self._last_update[pid] = now
+            self._inflight.add(pid)
+            self._job_queue.put((pid, self._generation.get(pid, 0), audio_path, active_meetings.get(pid)))
 
     def get_caption_for_present(self, presence_state: Dict[int, str]) -> Optional[str]:
         for pid, state in presence_state.items():
