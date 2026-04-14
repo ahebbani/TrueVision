@@ -129,7 +129,6 @@ def recognize_face():
         print("ERROR: Could not open camera. Ensure Picamera2 is installed and the RPi camera is connected.")
         return
     print("Press 'q' to quit.")
-    print("Press 't' to toggle transcription on/off (default: ON).")
 
     presence_state = {}
     last_detected_ts = {}
@@ -146,7 +145,6 @@ def recognize_face():
         verbose=bool(getattr(args, 'template_verbose', False)),
     ))
 
-    transcription_enabled = True
     active_recorders = {}
     active_meetings = {}
     create_recorder = None
@@ -162,7 +160,6 @@ def recognize_face():
         create_recorder, Transcriber, summarize_text = _create_recorder, _Transcriber, _summarize_text
     except Exception as e:
         print(f"WARNING: Transcription modules unavailable ({e}). Transcription disabled.")
-        transcription_enabled = False
 
     # ── ESP32 mode switch and marker integration ──────────────────────────────
     # current_mode is a one-element list so the closures below can mutate it.
@@ -195,9 +192,12 @@ def recognize_face():
             return MODE_BOTH
         return last_single_mode[0]
 
+    _first_mode_received = [False]
+
     def _set_requested_mode(mode_byte: int, *, source: str) -> None:
-        if current_mode[0] == mode_byte:
+        if current_mode[0] == mode_byte and _first_mode_received[0]:
             return
+        _first_mode_received[0] = True
         current_mode[0] = mode_byte
         if mode_byte in (MODE_AUDIO, MODE_FACE):
             last_single_mode[0] = mode_byte
@@ -225,44 +225,35 @@ def recognize_face():
     def _on_diag_request() -> None:
         print("ESP32: DIAG_REQUEST received; status pushed to ESP32.")
 
-    # Wire up callbacks on the shared receiver if using esp32-serial audio.
+    # Wire up callbacks on the shared receiver for ESP32 mode/marker events.
     _esp32_receiver = None
     try:
         from audio_analysis.transcription import get_shared_receiver
-        from audio_analysis.esp32_serial_audio import probe_esp32_uart_stream
-        should_init = (
-            forced_mode is not None
-            or (probe_esp32_uart_stream is not None and
-                probe_esp32_uart_stream(port=args.serial_port,
-                                        baud_rate=args.serial_baud,
-                                        timeout_sec=1.0))
+        _esp32_receiver = get_shared_receiver(
+            serial_port=args.serial_port,
+            serial_baud=args.serial_baud,
+            on_mode_change=_on_mode_change,
+            on_marker=_on_marker,
+            on_diag_request=_on_diag_request,
         )
-        if should_init:
-            _esp32_receiver = get_shared_receiver(
-                serial_port=args.serial_port,
-                serial_baud=args.serial_baud,
-                on_mode_change=_on_mode_change,
-                on_marker=_on_marker,
-                on_diag_request=_on_diag_request,
-            )
-            if forced_mode is not None:
-                _esp32_receiver.force_mode(forced_mode)
-                print(f"ESP32: Forced mode {_mode_label(forced_mode)} sent to firmware")
-            else:
-                _esp32_receiver.clear_forced_mode()
+        if forced_mode is not None:
+            _esp32_receiver.force_mode(forced_mode)
+            print(f"ESP32: Forced mode {_mode_label(forced_mode)} sent to firmware")
+        else:
+            _esp32_receiver.clear_forced_mode()
+        print(f"ESP32: Receiver initialised on {args.serial_port}")
     except Exception as _recv_err:
-        print(f"WARNING: Could not initialise ESP32 receiver for callbacks: {_recv_err}")
+        print(f"WARNING: ESP32 not detected on {args.serial_port} — running without ESP32 integration")
 
     transcriber: Optional[object] = None
-    if transcription_enabled and Transcriber is not None:
+    if Transcriber is not None:
         try:
             transcriber = Transcriber(model_size=args.whisper_model)
         except Exception as e:
             print(f"WARNING: Transcriber initialization failed ({e}). Transcription disabled.")
-            transcription_enabled = False
 
     captioner = None
-    if transcription_enabled and transcriber is not None:
+    if transcriber is not None:
         from audio_analysis.live_caption import LiveCaptioner, CaptionConfig
 
         captioner = LiveCaptioner(
@@ -318,28 +309,17 @@ def recognize_face():
             print(f"WARNING: AudioForwarder init failed ({e}).")
             return None
 
-    try:
-        pass  # ready
-    except Exception:
-        pass
-
     def _start_session(session_key: int, *, person_id: Optional[int], label_prefix: str) -> None:
-        nonlocal transcription_enabled
-        if not transcription_enabled or session_key in active_recorders:
+        if create_recorder is None or session_key in active_recorders:
             return
-        if create_recorder:
-            rec = create_recorder(
-                serial_port=args.serial_port,
-                serial_baud=args.serial_baud,
-            )
-        else:
-            return
+        rec = create_recorder(
+            serial_port=args.serial_port,
+            serial_baud=args.serial_baud,
+        )
         try:
             audio_path_pending = rec.start(RECORDINGS_DIR, label_prefix)
         except Exception as _rec_err:
-            print(f"WARNING: Could not start audio recorder ({_rec_err}). "
-                f"Transcription disabled for this run.")
-            transcription_enabled = False
+            print(f"WARNING: Could not start audio recorder ({_rec_err}).")
             return
 
         active_recorders[session_key] = rec
@@ -452,7 +432,7 @@ def recognize_face():
         # ── Local transcription path (original behavior) ────────────────
 
         transcript_text = None
-        if audio_path_final and transcription_enabled and transcriber is not None:
+        if audio_path_final and transcriber is not None:
             try:
                 transcript_text = transcriber.transcribe(audio_path_final)
             except Exception as e:
@@ -614,7 +594,7 @@ def recognize_face():
             for session_key in list(active_recorders.keys()):
                 _stop_session(session_key)
             _clear_face_presence()
-            if transcription_enabled:
+            if create_recorder is not None:
                 _start_session(AUDIO_SESSION_KEY, person_id=None, label_prefix="audio_only")
                 if AUDIO_SESSION_KEY in active_recorders:
                     presence_state[AUDIO_SESSION_KEY] = 'present'
@@ -636,6 +616,7 @@ def recognize_face():
                 captioner.clear(AUDIO_SESSION_KEY)
 
     applied_mode = None
+    print(f"Starting in {_mode_label(_effective_mode(current_mode[0]))} mode")
 
     while True:
         effective_mode = _effective_mode(current_mode[0])
@@ -749,8 +730,7 @@ def recognize_face():
                     if recognized_seen_count is not None:
                         recognized_seen_count += 1
                     recognized_last_seen_str = "now"
-                    mode_allows_recording = effective_mode in (MODE_AUDIO, MODE_BOTH)
-                    if transcription_enabled and recognized_id not in active_recorders and mode_allows_recording:
+                    if create_recorder is not None and recognized_id not in active_recorders and effective_mode in (MODE_AUDIO, MODE_BOTH):
                         _start_session(
                             int(recognized_id),
                             person_id=int(recognized_id),
@@ -780,20 +760,21 @@ def recognize_face():
                     if len(prev_line) > max_chars:
                         prev_line = prev_line[: max_chars - 1].rstrip() + "…"
                     cv2.putText(display_frame, f"Prev: {prev_line}", (x, y+30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-                if transcription_enabled and recognized_id in active_recorders:
+                if recognized_id in active_recorders and effective_mode == MODE_BOTH:
                     cv2.putText(display_frame, "REC", (x, y+45), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
         # Live transcription overlay (closed captioning)
         caption = None
-        if _server_offload_active and audio_forwarder is not None and audio_forwarder.is_connected:
-            # Get caption from server via WebSocket
-            for pid in list(active_recorders.keys()):
-                caption = audio_forwarder.get_latest_caption(pid)
-                if caption:
-                    break
-        elif transcription_enabled and captioner is not None and active_recorders:
-            captioner.update(active_recorders, active_meetings, cursor)
-            caption = captioner.get_caption_for_present(presence_state)
+        if effective_mode != MODE_FACE:
+            if _server_offload_active and audio_forwarder is not None and audio_forwarder.is_connected:
+                # Get caption from server via WebSocket
+                for pid in list(active_recorders.keys()):
+                    caption = audio_forwarder.get_latest_caption(pid)
+                    if caption:
+                        break
+            elif captioner is not None and active_recorders:
+                captioner.update(active_recorders, active_meetings, cursor)
+                caption = captioner.get_caption_for_present(presence_state)
 
         if caption:
                 img_h, img_w = display_frame.shape[0], display_frame.shape[1]
@@ -840,18 +821,6 @@ def recognize_face():
         key = cv2.waitKey(1)
         if key == ord('q'):
             break
-        if key == ord('t'):
-            transcription_enabled = not transcription_enabled
-            state_txt = 'ENABLED' if transcription_enabled else 'DISABLED'
-            print(f"Transcription {state_txt}")
-            if not transcription_enabled:
-                for session_key in list(active_recorders.keys()):
-                    _stop_session(session_key)
-                presence_state.pop(AUDIO_SESSION_KEY, None)
-                if captioner is not None:
-                    captioner.clear_all()
-            else:
-                applied_mode = None
 
     try:
         if _esp32_receiver is not None and forced_mode is not None:
