@@ -2,8 +2,9 @@
 """Test that the Raspberry Pi receives ESP32 MODE_CHANGE packets.
 
 Listens on the serial port using the production protocol and prints
-every packet type received.  Flip the switch while this runs — you
-should see MODE_CHANGE lines appear.
+every packet type received.  Sends heartbeats every 3 seconds so the
+ESP32 will respond with announce_mode().  Press/release the button
+while this runs — you should see MODE_CHANGE lines appear.
 
 Usage:
     sudo python test_mode_switch.py
@@ -31,6 +32,22 @@ PKT_NAMES = {
 }
 MODE_NAMES = {0x00: "AUDIO", 0x01: "FACE", 0x02: "BOTH"}
 
+# Pi → ESP32 packet types
+PKT_HEARTBEAT = 0x10
+
+
+def build_packet(pkt_type: int, data: bytes) -> bytes:
+    """Build a framed packet matching the production protocol."""
+    data_len = len(data)
+    header = bytes([
+        0xAA, 0x55,
+        pkt_type,
+        data_len & 0xFF,
+        (data_len >> 8) & 0xFF,
+    ])
+    checksum = sum(data) & 0xFF
+    return header + data + bytes([checksum])
+
 
 def main():
     p = argparse.ArgumentParser(description="Listen for ESP32 MODE_CHANGE packets")
@@ -41,7 +58,8 @@ def main():
     args = p.parse_args()
 
     print(f"Listening on {args.port} at {args.baud} baud for {args.seconds:.0f}s...")
-    print("Flip the switch now. You should see MODE_CHANGE lines.\n")
+    print("Press/release the mode button now. You should see MODE_CHANGE lines.")
+    print("Heartbeats are sent every 3s to trigger ESP32 mode announcements.\n")
 
     try:
         ser = serial.Serial(
@@ -64,8 +82,19 @@ def main():
     buf = bytearray()
     deadline = time.time() + args.seconds
     last_status = time.time()
+    last_heartbeat = 0.0
 
     while time.time() < deadline:
+        # Send heartbeat every 3 seconds so ESP32 responds with announce_mode()
+        now = time.time()
+        if now - last_heartbeat >= 3.0:
+            try:
+                hb = build_packet(PKT_HEARTBEAT, bytes([0x00]))
+                ser.write(hb)
+                last_heartbeat = now
+            except Exception as e:
+                print(f"  WARNING: heartbeat send failed: {e}")
+
         try:
             chunk = ser.read(4096)
         except SerialException as se:

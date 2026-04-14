@@ -121,11 +121,14 @@ static HardwareSerial &UART0 = Serial0;
 
 // ─── Board Profile ───────────────────────────────────────────────────────────
 // Production board: user button, mode switch, and two debug LEDs.
+// For the test board, a momentary push-button on MODE_PIN_A replaces the
+// SPDT switch.  Pressed (LOW) = AUDIO, released (HIGH) = FACE.
+// MODE_PIN_B is unused when using a single button.
 #define ENABLE_STATUS_LEDS    1
 #define ENABLE_MARKER_BUTTON  1
 #define ENABLE_MODE_SWITCH    1
-#define MODE_PIN_A            22   // Production switch leg A
-#define MODE_PIN_B            23   // Production switch leg B
+#define MODE_PIN_A            22   // Mode button (active-low with INPUT_PULLUP)
+#define MODE_PIN_B            23   // Unused on test board (kept for production SPDT)
 #define MODE_PIN_MODE         INPUT_PULLUP
 
 // ─── Protocol ────────────────────────────────────────────────────────────────
@@ -221,16 +224,12 @@ static inline bool is_valid_mode_byte(uint8_t mode) {
 }
 
 static uint8_t resolve_switch_mode(bool pin_a, bool pin_b, bool *valid) {
-    if (pin_a && !pin_b) {
-        if (valid) *valid = true;
-        return MODE_AUDIO;
-    }
-    if (!pin_a && pin_b) {
-        if (valid) *valid = true;
-        return MODE_FACE;
-    }
-    if (valid) *valid = false;
-    return s_last_valid_mode;
+    // Single-button mode: only pin_a is used.
+    // Pressed (LOW → pin_a=false) = AUDIO, Released (HIGH → pin_a=true) = FACE.
+    // pin_b is ignored (kept in signature for API compatibility).
+    (void)pin_b;
+    if (valid) *valid = true;
+    return pin_a ? MODE_FACE : MODE_AUDIO;
 }
 
 /**
