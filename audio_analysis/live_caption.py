@@ -12,6 +12,7 @@ from typing import Dict, Optional
 class CaptionConfig:
     interval_sec: float = 0.7
     max_words: int = 30
+    window_sec: float = 8.0
 
 
 class LiveCaptioner:
@@ -20,6 +21,7 @@ class LiveCaptioner:
         self.cfg = cfg
         self._last_update: Dict[int, float] = {}
         self._captions: Dict[int, str] = {}
+        self._status: Dict[int, str] = {}
         self._job_queue: queue.Queue = queue.Queue()
         self._result_queue: queue.Queue = queue.Queue()
         self._generation: Dict[int, int] = {}
@@ -41,12 +43,14 @@ class LiveCaptioner:
     def clear(self, pid: int) -> None:
         self._last_update.pop(pid, None)
         self._captions.pop(pid, None)
+        self._status.pop(pid, None)
         self._generation[pid] = self._generation.get(pid, 0) + 1
         self._inflight.discard(pid)
 
     def clear_all(self) -> None:
         self._last_update.clear()
         self._captions.clear()
+        self._status.clear()
         for pid in list(self._generation.keys()):
             self._generation[pid] = self._generation.get(pid, 0) + 1
         self._inflight.clear()
@@ -79,10 +83,12 @@ class LiveCaptioner:
             self._inflight.discard(pid)
 
             if err is not None:
+                self._status[pid] = "Transcription error"
                 print(f"LiveCaptioner: transcription error for pid={pid}: {err}")
                 continue
 
             self._captions[pid] = tail_txt or ''
+            self._status[pid] = "Listening..." if not tail_txt else "Captions live"
             if meeting_id is not None and text_live:
                 cursor.execute(
                     "UPDATE meetings SET transcript = ? WHERE id = ?",
@@ -107,17 +113,21 @@ class LiveCaptioner:
             flush = getattr(rec, 'flush_to_wav', None)
             if flush is not None:
                 try:
-                    flushed = flush()
+                    flushed = flush(seconds=self.cfg.window_sec)
                 except Exception:
                     flushed = False
                 # If flush returned False the buffer was empty — file wasn't written.
                 # Skip transcription this cycle rather than erroring on a missing file.
                 if not flushed:
+                    self._status[pid] = "Waiting for audio..."
                     continue
             # Confirm the audio file actually exists before handing to Whisper.
             if not os.path.exists(audio_path):
+                self._status[pid] = "Waiting for audio..."
                 continue
             self._last_update[pid] = now
+            if not self._captions.get(pid):
+                self._status[pid] = "Transcribing..."
             self._inflight.add(pid)
             self._job_queue.put((pid, self._generation.get(pid, 0), audio_path, active_meetings.get(pid)))
 
@@ -128,4 +138,12 @@ class LiveCaptioner:
         # fallback to any caption
         if self._captions:
             return next(iter(self._captions.values()))
+        return None
+
+    def get_status_for_present(self, presence_state: Dict[int, str]) -> Optional[str]:
+        for pid, state in presence_state.items():
+            if state == 'present' and pid in self._status:
+                return self._status.get(pid)
+        if self._status:
+            return next(iter(self._status.values()))
         return None

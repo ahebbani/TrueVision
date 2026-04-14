@@ -491,7 +491,7 @@ class ESP32SerialRecorder:
         self._start_time: Optional[float] = None
         self._recording = False
     
-    def flush_to_wav(self) -> bool:
+    def flush_to_wav(self, seconds: Optional[float] = None) -> bool:
         """Write the current buffer contents to audio_path without stopping the recording.
 
         Called by LiveCaptioner before each transcription attempt so the file
@@ -499,8 +499,9 @@ class ESP32SerialRecorder:
         """
         if not self._recording or self.audio_path is None:
             return False
-        elapsed = time.time() - self._start_time if self._start_time else None
-        return self.receiver.write_to_wav(self.audio_path, seconds=elapsed)
+        if seconds is None:
+            seconds = time.time() - self._start_time if self._start_time else None
+        return self.receiver.write_to_wav(self.audio_path, seconds=seconds)
 
     def start(self, directory: str, filename_prefix: str = "meeting") -> str:
         """Start a recording session."""

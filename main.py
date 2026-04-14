@@ -91,6 +91,8 @@ def parse_args():
     p.add_argument('--caption-interval', type=float, default=0.7, help='Seconds between caption updates')
     p.add_argument('--caption-max-words', type=int, default=30)
     p.add_argument('--caption-max-lines', type=int, default=2)
+    p.add_argument('--caption-window-sec', type=float, default=8.0,
+                   help='Rolling audio window to transcribe for live captions (default: %(default)s)')
         # ESP32 UART flags
     p.add_argument('--serial-port', default='/dev/serial0', help='Serial port for ESP32 audio (default: /dev/serial0)')
     p.add_argument('--serial-baud', type=int, default=921600, help='Baud rate for ESP32 serial')
@@ -264,7 +266,11 @@ def recognize_face():
 
         captioner = LiveCaptioner(
             transcriber,
-            CaptionConfig(interval_sec=args.caption_interval, max_words=args.caption_max_words),
+            CaptionConfig(
+                interval_sec=args.caption_interval,
+                max_words=args.caption_max_words,
+                window_sec=args.caption_window_sec,
+            ),
         )
 
     # ── Server connection for offloaded transcription ─────────────────────
@@ -771,6 +777,7 @@ def recognize_face():
 
         # Live transcription overlay (closed captioning)
         caption = None
+        caption_status = None
         if effective_mode != MODE_FACE:
             if _server_offload_active and audio_forwarder is not None and audio_forwarder.is_connected:
                 # Get caption from server via WebSocket
@@ -781,36 +788,38 @@ def recognize_face():
             elif captioner is not None and active_recorders:
                 captioner.update(active_recorders, active_meetings, cursor)
                 caption = captioner.get_caption_for_present(presence_state)
+                caption_status = captioner.get_status_for_present(presence_state)
 
-        if caption:
-                img_h, img_w = display_frame.shape[0], display_frame.shape[1]
-                margin = 10
-                font = cv2.FONT_HERSHEY_SIMPLEX
-                font_scale = 0.6
-                thickness = 2
-                words = caption.split()
-                lines = []
-                current = ""
-                for w in words:
-                    test = (current + (" " if current else "") + w)
-                    ((tw, _th), _) = cv2.getTextSize(test, font, font_scale, thickness)
-                    if tw + margin*2 <= img_w:
-                        current = test
-                    else:
-                        if current:
-                            lines.append(current)
-                        current = w
-                if current:
-                    lines.append(current)
-                lines = lines[-int(args.caption_max_lines):]
-                line_height = int(cv2.getTextSize("Ag", font, font_scale, thickness)[0][1] * 1.6)
-                box_height = line_height * len(lines) + margin*2
-                y0 = max(0, img_h - box_height)
-                cv2.rectangle(display_frame, (0, y0), (img_w, img_h), (0, 0, 0), -1)
-                y = y0 + margin + int(line_height * 0.8)
-                for ln in lines:
-                    cv2.putText(display_frame, ln, (margin, y), font, font_scale, (255, 255, 255), thickness)
-                    y += line_height
+        overlay_text = caption or caption_status
+        if overlay_text:
+            img_h, img_w = display_frame.shape[0], display_frame.shape[1]
+            margin = 10
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.6
+            thickness = 2
+            words = overlay_text.split()
+            lines = []
+            current = ""
+            for w in words:
+                test = (current + (" " if current else "") + w)
+                ((tw, _th), _) = cv2.getTextSize(test, font, font_scale, thickness)
+                if tw + margin*2 <= img_w:
+                    current = test
+                else:
+                    if current:
+                        lines.append(current)
+                    current = w
+            if current:
+                lines.append(current)
+            lines = lines[-int(args.caption_max_lines):]
+            line_height = int(cv2.getTextSize("Ag", font, font_scale, thickness)[0][1] * 1.6)
+            box_height = line_height * len(lines) + margin*2
+            y0 = max(0, img_h - box_height)
+            cv2.rectangle(display_frame, (0, y0), (img_w, img_h), (0, 0, 0), -1)
+            y = y0 + margin + int(line_height * 0.8)
+            for ln in lines:
+                cv2.putText(display_frame, ln, (margin, y), font, font_scale, (255, 255, 255), thickness)
+                y += line_height
 
         now_ts = time.time()
         for pid, state in list(presence_state.items()):
