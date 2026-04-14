@@ -48,8 +48,10 @@ import soundfile as sf
 
 try:
     import serial
+    from serial import SerialException
 except ImportError:
     serial = None  # type: ignore
+    SerialException = Exception  # type: ignore
 
 # ── Packet type constants (must match truevision_main.ino) ───────────────────
 # ESP32 → Pi
@@ -192,7 +194,13 @@ class ESP32SerialAudioReceiver:
         probe_buf = bytearray()
         probe_deadline = time.time() + 2.0
         while time.time() < probe_deadline and not self._stop_event.is_set():
-            chunk = ser.read(4096)
+            try:
+                chunk = ser.read(4096)
+            except SerialException as se:
+                if "returned no data" in str(se):
+                    time.sleep(0.05)
+                    continue
+                raise
             if chunk:
                 probe_buf.extend(chunk)
                 if sync in probe_buf:
@@ -432,6 +440,17 @@ class ESP32SerialAudioReceiver:
 
                 # Unknown types are silently ignored (forward-compatible)
 
+            except SerialException as se:
+                # Pi 5 RP1 UART reports false readiness on an idle line
+                # (e.g. ESP32 in FACE mode, no audio streaming).  This is
+                # harmless — sleep briefly and retry instead of reconnecting.
+                if "returned no data" in str(se):
+                    time.sleep(0.1)
+                    continue
+                if not self._stop_event.is_set():
+                    print(f"ESP32 Serial Audio: Serial error in receiver loop: {se}")
+                    if not self._reconnect_serial():
+                        break
             except Exception as e:
                 if not self._stop_event.is_set():
                     print(f"ESP32 Serial Audio: Error in receiver loop: {e}")
@@ -451,12 +470,22 @@ class ESP32SerialAudioReceiver:
             if self._stop_event.is_set():
                 return False
             
-            byte1 = self._serial.read(1)
+            try:
+                byte1 = self._serial.read(1)
+            except SerialException as se:
+                if "returned no data" in str(se):
+                    return False  # idle line, let caller retry
+                raise
             if len(byte1) != 1:
                 continue
             
             if byte1[0] == self.SYNC_BYTE_1:
-                byte2 = self._serial.read(1)
+                try:
+                    byte2 = self._serial.read(1)
+                except SerialException as se:
+                    if "returned no data" in str(se):
+                        return False
+                    raise
                 if len(byte2) == 1 and byte2[0] == self.SYNC_BYTE_2:
                     return True
         
