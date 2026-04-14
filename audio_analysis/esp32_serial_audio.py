@@ -452,6 +452,10 @@ class ESP32SerialAudioReceiver:
             if len(audio_bytes) < min_bytes:
                 return False
             
+            # Trim to a multiple of 2 so np.frombuffer doesn't raise
+            # "buffer size must be a multiple of element size" on odd-length slices.
+            audio_bytes = audio_bytes[:len(audio_bytes) & ~1]
+
             # Convert bytes to numpy array (16-bit signed integers)
             audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
             
