@@ -230,6 +230,8 @@ class ESP32SerialAudioReceiver:
 
     def _reconnect_serial(self) -> bool:
         self._close_serial()
+        backoff = 1.0
+        max_backoff = 10.0
         while not self._stop_event.is_set():
             try:
                 self._open_serial(reconnecting=True)
@@ -237,9 +239,10 @@ class ESP32SerialAudioReceiver:
             except Exception as reconnect_err:
                 print(
                     f"ESP32 Serial Audio: Reconnect failed on {self.port}: {reconnect_err}. "
-                    f"Retrying..."
+                    f"Retrying in {backoff:.0f}s..."
                 )
-                self._stop_event.wait(timeout=1.0)
+                self._stop_event.wait(timeout=backoff)
+                backoff = min(backoff * 2, max_backoff)
         return False
     
     def start(self) -> None:
@@ -247,6 +250,14 @@ class ESP32SerialAudioReceiver:
         if self._running:
             return
         
+        # Log what the port symlink resolves to (useful for Pi 5 debugging)
+        try:
+            resolved = os.path.realpath(self.port)
+            if resolved != self.port:
+                print(f"ESP32 Serial Audio: {self.port} → {resolved}")
+        except Exception:
+            pass
+
         try:
             self._open_serial()
         except Exception as e:
@@ -426,7 +437,6 @@ class ESP32SerialAudioReceiver:
                     print(f"ESP32 Serial Audio: Error in receiver loop: {e}")
                     if not self._reconnect_serial():
                         break
-                time.sleep(0.1)
 
         print("ESP32 Serial Audio: Receiver thread stopped")
     
