@@ -92,6 +92,28 @@ def ensure_all_schemas(conn: sqlite3.Connection) -> None:
     ensure_face_embeddings_schema(conn)
     ensure_meetings_schema(conn)
 
+
+def insert_face_with_template(
+    conn: sqlite3.Connection,
+    name: str,
+    embedding: bytes,
+    *,
+    quality: Optional[float] = None,
+) -> int:
+    """Insert a person and their initial template in one transaction."""
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO faces (name, embedding, created_at, seen_count) VALUES (?, ?, datetime('now'), 0)",
+        (name, embedding),
+    )
+    face_id = int(cur.lastrowid)
+    cur.execute(
+        "INSERT INTO face_embeddings (face_id, embedding, created_at, quality) VALUES (?, ?, datetime('now'), ?)",
+        (face_id, embedding, quality),
+    )
+    conn.commit()
+    return face_id
+
 # --- Embedding pruning ------------------------------------------------------
 
 def prune_embeddings_if_needed(conn: sqlite3.Connection, face_id: int, max_count: int = MAX_TEMPLATES_PER_PERSON) -> None:
@@ -159,6 +181,7 @@ __all__ = [
     "DB_PATH",
     "open_db",
     "ensure_all_schemas",
+    "insert_face_with_template",
     "prune_embeddings_if_needed",
     "MAX_TEMPLATES_PER_PERSON",
     "get_latest_finished_meeting",

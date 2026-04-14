@@ -19,9 +19,10 @@ class RecognizerConfig:
     diversity_min_dist: float = 0.20
     add_cooldown_sec: float = 5.0
     bootstrap_template_count: int = 5
-    bootstrap_quality_min_var: float = 80.0
-    bootstrap_diversity_min_dist: float = 0.10
-    bootstrap_add_cooldown_sec: float = 1.0
+    bootstrap_force_until_count: int = 3
+    bootstrap_quality_min_var: float = 60.0
+    bootstrap_diversity_min_dist: float = 0.08
+    bootstrap_add_cooldown_sec: float = 0.75
     verbose: bool = False
 
 
@@ -150,6 +151,7 @@ class Recognizer:
         rows = cur.fetchall()
         template_count = len(rows)
         in_bootstrap = template_count < self.cfg.bootstrap_template_count
+        force_bootstrap = template_count < self.cfg.bootstrap_force_until_count
 
         quality_min_var = (
             self.cfg.bootstrap_quality_min_var if in_bootstrap else self.cfg.quality_min_var
@@ -173,7 +175,7 @@ class Recognizer:
             return False
 
         is_diverse = True
-        if rows:
+        if rows and not force_bootstrap:
             dists = [np.linalg.norm(emb_live - np.frombuffer(r[0], dtype=np.float64)) for r in rows]
             if dists:
                 mind = min(dists)
@@ -181,6 +183,8 @@ class Recognizer:
                 if self.cfg.verbose:
                     phase = 'bootstrap' if in_bootstrap else 'steady'
                     print(f"[templates] diversity check ({phase}): min_dist={mind:.3f} threshold={diversity_min_dist} -> {'OK' if is_diverse else 'skip'}")
+        elif rows and force_bootstrap and self.cfg.verbose:
+            print(f"[templates] diversity bypass during bootstrap ({template_count} < {self.cfg.bootstrap_force_until_count})")
         if not is_diverse:
             return False
 

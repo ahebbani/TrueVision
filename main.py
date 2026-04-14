@@ -84,6 +84,16 @@ def parse_args():
     p.add_argument('--quality-min-var', type=float, default=120.0)
     p.add_argument('--diversity-min-dist', type=float, default=0.20)
     p.add_argument('--add-cooldown-sec', type=float, default=5.0)
+    p.add_argument('--bootstrap-template-count', type=int, default=5,
+                   help='How many templates to collect before switching to steady-state template thresholds')
+    p.add_argument('--bootstrap-force-until-count', type=int, default=3,
+                   help='Collect templates on quality and cooldown alone until this many templates exist')
+    p.add_argument('--bootstrap-quality-min-var', type=float, default=60.0,
+                   help='Minimum Laplacian variance for bootstrap template collection')
+    p.add_argument('--bootstrap-diversity-min-dist', type=float, default=0.08,
+                   help='Minimum L2 distance between bootstrap templates once force-bootstrap is complete')
+    p.add_argument('--bootstrap-add-cooldown-sec', type=float, default=0.75,
+                   help='Cooldown between bootstrap template additions')
     p.add_argument('--template-verbose', action='store_true', help='Verbose logs for template add/skip decisions')
     p.add_argument('--absence-grace-sec', type=float, default=2.0)
     # Transcription flags
@@ -147,6 +157,11 @@ def recognize_face():
         quality_min_var=args.quality_min_var,
         diversity_min_dist=args.diversity_min_dist,
         add_cooldown_sec=args.add_cooldown_sec,
+        bootstrap_template_count=args.bootstrap_template_count,
+        bootstrap_force_until_count=args.bootstrap_force_until_count,
+        bootstrap_quality_min_var=args.bootstrap_quality_min_var,
+        bootstrap_diversity_min_dist=args.bootstrap_diversity_min_dist,
+        bootstrap_add_cooldown_sec=args.bootstrap_add_cooldown_sec,
         verbose=bool(getattr(args, 'template_verbose', False)),
     )
     recog: Optional[Recognizer] = None
