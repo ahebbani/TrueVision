@@ -173,7 +173,7 @@ def recognize_face():
         'both': MODE_BOTH,
     }.get(args.force_mode)
     _server_offload_active = False  # True when server is handling audio
-    current_mode = [forced_mode if forced_mode is not None else MODE_BOTH]
+    current_mode = [forced_mode if forced_mode is not None else MODE_FACE]
     last_single_mode = [forced_mode if forced_mode in (MODE_AUDIO, MODE_FACE) else MODE_FACE]
     AUDIO_SESSION_KEY = -1
     # Thread-safe queue for marker events (PKT_MARKER from ESP32 button).
@@ -610,6 +610,7 @@ def recognize_face():
 
     def _apply_mode_transition(mode_byte: int) -> None:
         if mode_byte == MODE_AUDIO:
+            print("Mode: Switching to AUDIO — face recognition paused, live captions enabled")
             for session_key in list(active_recorders.keys()):
                 _stop_session(session_key)
             _clear_face_presence()
@@ -618,6 +619,7 @@ def recognize_face():
                 if AUDIO_SESSION_KEY in active_recorders:
                     presence_state[AUDIO_SESSION_KEY] = 'present'
         elif mode_byte == MODE_FACE:
+            print("Mode: Switching to FACE — face recognition active, audio recording stopped")
             for session_key in list(active_recorders.keys()):
                 _stop_session(session_key)
             presence_state.clear()
@@ -625,6 +627,7 @@ def recognize_face():
             if captioner is not None:
                 captioner.clear_all()
         else:
+            print("Mode: Switching to BOTH — face recognition + server audio active")
             if AUDIO_SESSION_KEY in active_recorders:
                 _stop_session(AUDIO_SESSION_KEY)
             presence_state.pop(AUDIO_SESSION_KEY, None)
@@ -688,10 +691,8 @@ def recognize_face():
                 break
 
         recognized_ids_in_frame = set()
-        # Skip face detection only when the ESP32 is connected AND in AUDIO-only mode,
-        # UNLESS the server is handling audio (then we can do both).
-        _mode_gate_active = (forced_mode is not None) or (_esp32_receiver is not None)
-        _skip_face = _mode_gate_active and (effective_mode == MODE_AUDIO)
+        # Skip face detection entirely in AUDIO-only mode.
+        _skip_face = (effective_mode == MODE_AUDIO)
         faces_info = [] if _skip_face else recog.detect_and_recognize(conn, frame)
         if not hasattr(recognize_face, "_prev_summaries"):
             recognize_face._prev_summaries = {}
@@ -748,7 +749,7 @@ def recognize_face():
                     if recognized_seen_count is not None:
                         recognized_seen_count += 1
                     recognized_last_seen_str = "now"
-                    mode_allows_recording = (not _mode_gate_active) or (effective_mode != MODE_FACE)
+                    mode_allows_recording = effective_mode in (MODE_AUDIO, MODE_BOTH)
                     if transcription_enabled and recognized_id not in active_recorders and mode_allows_recording:
                         _start_session(
                             int(recognized_id),
