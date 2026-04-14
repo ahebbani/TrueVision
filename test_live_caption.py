@@ -69,7 +69,7 @@ class LiveCaptionerTests(unittest.TestCase):
             self.assertEqual(len(cursor.calls), 1)
             self.assertEqual(cursor.calls[0][1], ("one two three four", 99))
             self.assertGreaterEqual(len(active_recorders[1].flush_calls), 1)
-            self.assertTrue(all(v == 8.0 for v in active_recorders[1].flush_calls))
+            self.assertTrue(all(v == 3.0 for v in active_recorders[1].flush_calls))
         finally:
             captioner.stop()
             os.unlink(audio_path)

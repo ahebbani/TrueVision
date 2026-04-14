@@ -91,8 +91,10 @@ def parse_args():
     p.add_argument('--caption-interval', type=float, default=0.7, help='Seconds between caption updates')
     p.add_argument('--caption-max-words', type=int, default=30)
     p.add_argument('--caption-max-lines', type=int, default=2)
-    p.add_argument('--caption-window-sec', type=float, default=8.0,
+    p.add_argument('--caption-window-sec', type=float, default=3.0,
                    help='Rolling audio window to transcribe for live captions (default: %(default)s)')
+    p.add_argument('--show-caption-status', action='store_true',
+                   help='Show debug caption status messages while waiting for speech-to-text output')
         # ESP32 UART flags
     p.add_argument('--serial-port', default='/dev/serial0', help='Serial port for ESP32 audio (default: /dev/serial0)')
     p.add_argument('--serial-baud', type=int, default=921600, help='Baud rate for ESP32 serial')
@@ -790,7 +792,9 @@ def recognize_face():
                 caption = captioner.get_caption_for_present(presence_state)
                 caption_status = captioner.get_status_for_present(presence_state)
 
-        overlay_text = caption or caption_status
+        overlay_text = caption
+        if overlay_text is None and args.show_caption_status:
+            overlay_text = caption_status
         if overlay_text:
             img_h, img_w = display_frame.shape[0], display_frame.shape[1]
             margin = 10

@@ -12,7 +12,7 @@ from typing import Dict, Optional
 class CaptionConfig:
     interval_sec: float = 0.7
     max_words: int = 30
-    window_sec: float = 8.0
+    window_sec: float = 3.0
 
 
 class LiveCaptioner:
