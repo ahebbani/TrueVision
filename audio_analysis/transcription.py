@@ -31,12 +31,35 @@ class Transcriber:
         self.device = device
         self.compute_type = compute_type
         self._model: Optional[WhisperModel] = None
+        self._model_lock = threading.Lock()
+        # Load the model eagerly in a background thread so the first call to
+        # transcribe() doesn't block the main loop (which would freeze the UI).
+        self._model_ready = threading.Event()
+        t = threading.Thread(target=self._load_model_bg, daemon=True, name='whisper-load')
+        t.start()
+
+    def _load_model_bg(self) -> None:
+        try:
+            if WhisperModel is not None:
+                m = WhisperModel(self.model_size, device=self.device, compute_type=self.compute_type)
+                with self._model_lock:
+                    self._model = m
+                print(f"Transcriber: Whisper '{self.model_size}' model loaded.")
+        except Exception as e:
+            print(f"Transcriber: WARNING — background model load failed: {e}")
+        finally:
+            self._model_ready.set()
 
     def _ensure_model(self):
         if WhisperModel is None:
             raise RuntimeError("faster-whisper is not installed. Install it or disable transcription.")
-        if self._model is None:
-            self._model = WhisperModel(self.model_size, device=self.device, compute_type=self.compute_type)
+        # Block until the background load completes (should already be done by
+        # the time the first audio session starts).
+        self._model_ready.wait()
+        with self._model_lock:
+            if self._model is None:
+                # Background load failed; try once more on this thread.
+                self._model = WhisperModel(self.model_size, device=self.device, compute_type=self.compute_type)
 
     def transcribe(self, audio_path: str) -> str:
         self._ensure_model()
