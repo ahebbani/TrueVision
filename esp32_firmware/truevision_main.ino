@@ -124,9 +124,9 @@ static HardwareSerial &UART0 = Serial0;
 #define ENABLE_STATUS_LEDS    1
 #define ENABLE_MARKER_BUTTON  1
 #define ENABLE_MODE_SWITCH    1
-#define MODE_PIN_A            35   // Production switch leg A
-#define MODE_PIN_B            36   // Production switch leg B
-#define MODE_PIN_MODE         INPUT
+#define MODE_PIN_A            22   // Production switch leg A
+#define MODE_PIN_B            23   // Production switch leg B
+#define MODE_PIN_MODE         INPUT_PULLUP
 
 // ─── Protocol ────────────────────────────────────────────────────────────────
 #define SYNC_BYTE_1       0xAA
