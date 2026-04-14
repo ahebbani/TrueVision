@@ -12,7 +12,8 @@ from typing import Dict, Optional
 class CaptionConfig:
     interval_sec: float = 0.7
     max_words: int = 30
-    window_sec: float = 3.0
+    window_sec: float = 2.0
+    language: str = "en"
 
 
 class LiveCaptioner:
@@ -63,7 +64,11 @@ class LiveCaptioner:
 
             pid, generation, audio_path, meeting_id = job
             try:
-                text_live = self.transcriber.transcribe(audio_path)
+                live_transcribe = getattr(self.transcriber, 'transcribe_live', None)
+                if live_transcribe is not None:
+                    text_live = live_transcribe(audio_path, language=self.cfg.language)
+                else:
+                    text_live = self.transcriber.transcribe(audio_path)
                 words = (text_live or '').strip().split()
                 tail_txt = ' '.join(words[-self.cfg.max_words:])
                 self._result_queue.put((pid, generation, meeting_id, text_live, tail_txt, None))

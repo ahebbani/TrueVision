@@ -18,6 +18,10 @@ class RecognizerConfig:
     quality_min_var: float = 120.0
     diversity_min_dist: float = 0.20
     add_cooldown_sec: float = 5.0
+    bootstrap_template_count: int = 5
+    bootstrap_quality_min_var: float = 80.0
+    bootstrap_diversity_min_dist: float = 0.10
+    bootstrap_add_cooldown_sec: float = 1.0
     verbose: bool = False
 
 
@@ -138,31 +142,45 @@ class Recognizer:
         conn.commit()
 
     def maybe_add_embedding(self, conn, person_id: int, emb_live: np.ndarray, quality: Optional[float]):
-        if quality is None or quality < self.cfg.quality_min_var:
-            if self.cfg.verbose:
-                print(f"[templates] skip: low quality (var={quality:.2f} < {self.cfg.quality_min_var})")
-            return False
-        now_add = time.time()
-        last_ts = self._last_added_ts.get(person_id, 0.0)
-        if (now_add - last_ts) < self.cfg.add_cooldown_sec:
-            if self.cfg.verbose:
-                print(f"[templates] skip: cooldown ({now_add - last_ts:.2f}s < {self.cfg.add_cooldown_sec}s)")
-            return False
-
         cur = conn.cursor()
         cur.execute(
             "SELECT embedding FROM face_embeddings WHERE face_id = ?",
             (person_id,),
         )
         rows = cur.fetchall()
+        template_count = len(rows)
+        in_bootstrap = template_count < self.cfg.bootstrap_template_count
+
+        quality_min_var = (
+            self.cfg.bootstrap_quality_min_var if in_bootstrap else self.cfg.quality_min_var
+        )
+        diversity_min_dist = (
+            self.cfg.bootstrap_diversity_min_dist if in_bootstrap else self.cfg.diversity_min_dist
+        )
+        add_cooldown_sec = (
+            self.cfg.bootstrap_add_cooldown_sec if in_bootstrap else self.cfg.add_cooldown_sec
+        )
+
+        if quality is None or quality < quality_min_var:
+            if self.cfg.verbose:
+                print(f"[templates] skip: low quality (var={quality:.2f} < {quality_min_var})")
+            return False
+        now_add = time.time()
+        last_ts = self._last_added_ts.get(person_id, 0.0)
+        if (now_add - last_ts) < add_cooldown_sec:
+            if self.cfg.verbose:
+                print(f"[templates] skip: cooldown ({now_add - last_ts:.2f}s < {add_cooldown_sec}s)")
+            return False
+
         is_diverse = True
         if rows:
             dists = [np.linalg.norm(emb_live - np.frombuffer(r[0], dtype=np.float64)) for r in rows]
             if dists:
                 mind = min(dists)
-                is_diverse = (mind >= self.cfg.diversity_min_dist)
+                is_diverse = (mind >= diversity_min_dist)
                 if self.cfg.verbose:
-                    print(f"[templates] diversity check: min_dist={mind:.3f} threshold={self.cfg.diversity_min_dist} -> {'OK' if is_diverse else 'skip'}")
+                    phase = 'bootstrap' if in_bootstrap else 'steady'
+                    print(f"[templates] diversity check ({phase}): min_dist={mind:.3f} threshold={diversity_min_dist} -> {'OK' if is_diverse else 'skip'}")
         if not is_diverse:
             return False
 

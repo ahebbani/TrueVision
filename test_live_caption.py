@@ -29,11 +29,16 @@ class _SlowTranscriber:
         self.delay = delay
         self.text = text
         self.calls = 0
+        self.live_calls = []
 
     def transcribe(self, audio_path: str) -> str:
         self.calls += 1
         time.sleep(self.delay)
         return self.text
+
+    def transcribe_live(self, audio_path: str, language: str = 'en') -> str:
+        self.live_calls.append(language)
+        return self.transcribe(audio_path)
 
 
 class LiveCaptionerTests(unittest.TestCase):
@@ -66,10 +71,11 @@ class LiveCaptionerTests(unittest.TestCase):
 
             self.assertEqual(caption, "three four")
             self.assertEqual(transcriber.calls, 1)
+            self.assertEqual(transcriber.live_calls, ['en'])
             self.assertEqual(len(cursor.calls), 1)
             self.assertEqual(cursor.calls[0][1], ("one two three four", 99))
             self.assertGreaterEqual(len(active_recorders[1].flush_calls), 1)
-            self.assertTrue(all(v == 3.0 for v in active_recorders[1].flush_calls))
+            self.assertTrue(all(v == 2.0 for v in active_recorders[1].flush_calls))
         finally:
             captioner.stop()
             os.unlink(audio_path)
@@ -106,14 +112,14 @@ class LiveCaptionerTests(unittest.TestCase):
             audio_path = tmp.name
 
         transcriber = _SlowTranscriber(0.2, "hello there")
-        captioner = LiveCaptioner(transcriber, CaptionConfig(interval_sec=0.0, max_words=5, window_sec=3.0))
+        captioner = LiveCaptioner(transcriber, CaptionConfig(interval_sec=0.0, max_words=5, window_sec=2.0))
         cursor = _FakeCursor()
         active_recorders = {5: _FakeRecorder(audio_path)}
 
         try:
             captioner.update(active_recorders, {}, cursor)
             self.assertEqual(captioner.get_status_for_present({5: 'present'}), "Transcribing...")
-            self.assertEqual(active_recorders[5].flush_calls, [3.0])
+            self.assertEqual(active_recorders[5].flush_calls, [2.0])
 
             deadline = time.time() + 2.0
             while time.time() < deadline:

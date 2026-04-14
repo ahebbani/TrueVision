@@ -70,6 +70,25 @@ class Transcriber:
             text_parts.append(seg.text.strip())
         return " ".join([t for t in text_parts if t])
 
+    def transcribe_live(self, audio_path: str, language: Optional[str] = "en") -> str:
+        self._ensure_model()
+        assert self._model is not None
+
+        kwargs = {
+            "beam_size": 1,
+            "condition_on_previous_text": False,
+            "without_timestamps": True,
+            "vad_filter": False,
+        }
+        if language and language != "auto":
+            kwargs["language"] = language
+
+        segments, info = self._model.transcribe(audio_path, **kwargs)
+        text_parts = []
+        for seg in segments:
+            text_parts.append(seg.text.strip())
+        return " ".join([t for t in text_parts if t])
+
 
 def summarize_text(text: str, max_sentences: int = 5) -> str:
     """Very simple extractive summary: return up to N sentences.

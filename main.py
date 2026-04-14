@@ -91,8 +91,10 @@ def parse_args():
     p.add_argument('--caption-interval', type=float, default=0.7, help='Seconds between caption updates')
     p.add_argument('--caption-max-words', type=int, default=30)
     p.add_argument('--caption-max-lines', type=int, default=2)
-    p.add_argument('--caption-window-sec', type=float, default=3.0,
+    p.add_argument('--caption-window-sec', type=float, default=2.0,
                    help='Rolling audio window to transcribe for live captions (default: %(default)s)')
+    p.add_argument('--caption-language', default='en',
+                   help='Language hint for fast local live captions; use auto to let Whisper detect language')
     p.add_argument('--show-caption-status', action='store_true',
                    help='Show debug caption status messages while waiting for speech-to-text output')
         # ESP32 UART flags
@@ -272,6 +274,7 @@ def recognize_face():
                 interval_sec=args.caption_interval,
                 max_words=args.caption_max_words,
                 window_sec=args.caption_window_sec,
+                language=args.caption_language,
             ),
         )
 
