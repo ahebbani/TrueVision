@@ -176,6 +176,71 @@ class ESP32SerialAudioReceiver:
         self.packets_received = 0
         self.packets_corrupted = 0
         self.bytes_received = 0
+
+    def _close_serial(self) -> None:
+        with self._write_lock:
+            ser = self._serial
+            self._serial = None
+            if ser is not None:
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+
+    def _probe_sync(self, ser: object) -> bool:
+        sync = bytes([self.SYNC_BYTE_1, self.SYNC_BYTE_2])
+        probe_buf = bytearray()
+        probe_deadline = time.time() + 2.0
+        while time.time() < probe_deadline and not self._stop_event.is_set():
+            chunk = ser.read(4096)
+            if chunk:
+                probe_buf.extend(chunk)
+                if sync in probe_buf:
+                    return True
+                if len(probe_buf) > 8192:
+                    probe_buf = probe_buf[-2048:]
+        return False
+
+    def _open_serial(self, *, reconnecting: bool = False) -> None:
+        ser = serial.Serial(
+            port=self.port,
+            baudrate=self.baud_rate,
+            bytesize=serial.EIGHTBITS,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE,
+            timeout=1.0,
+        )
+
+        esp32_detected = self._probe_sync(ser)
+        with self._write_lock:
+            self._serial = ser
+
+        if esp32_detected:
+            prefix = "Reconnected" if reconnecting else "Connected"
+            print(
+                f"ESP32 Serial Audio: {prefix} to {self.port} at {self.baud_rate} baud "
+                f"(sync detected)"
+            )
+        else:
+            state = "reopened" if reconnecting else "opened"
+            print(
+                f"ESP32 Serial Audio: WARNING - port {self.port} {state} but no ESP32 sync "
+                f"bytes detected. The ESP32 may not be connected or transmitting."
+            )
+
+    def _reconnect_serial(self) -> bool:
+        self._close_serial()
+        while not self._stop_event.is_set():
+            try:
+                self._open_serial(reconnecting=True)
+                return True
+            except Exception as reconnect_err:
+                print(
+                    f"ESP32 Serial Audio: Reconnect failed on {self.port}: {reconnect_err}. "
+                    f"Retrying..."
+                )
+                self._stop_event.wait(timeout=1.0)
+        return False
     
     def start(self) -> None:
         """Start receiving audio from serial port."""
@@ -183,37 +248,9 @@ class ESP32SerialAudioReceiver:
             return
         
         try:
-            self._serial = serial.Serial(
-                port=self.port,
-                baudrate=self.baud_rate,
-                bytesize=serial.EIGHTBITS,
-                parity=serial.PARITY_NONE,
-                stopbits=serial.STOPBITS_ONE,
-                timeout=1.0  # 1 second read timeout
-            )
+            self._open_serial()
         except Exception as e:
             raise RuntimeError(f"Failed to open serial port {self.port}: {e}")
-
-        # Quick check for ESP32 sync bytes before declaring connection.
-        sync = bytes([self.SYNC_BYTE_1, self.SYNC_BYTE_2])
-        _probe_buf = bytearray()
-        _probe_deadline = time.time() + 2.0
-        _esp32_detected = False
-        while time.time() < _probe_deadline:
-            chunk = self._serial.read(4096)
-            if chunk:
-                _probe_buf.extend(chunk)
-                if sync in _probe_buf:
-                    _esp32_detected = True
-                    break
-                if len(_probe_buf) > 8192:
-                    _probe_buf = _probe_buf[-2048:]
-        if _esp32_detected:
-            print(f"ESP32 Serial Audio: Connected to {self.port} at {self.baud_rate} baud "
-                  f"(sync detected)")
-        else:
-            print(f"ESP32 Serial Audio: WARNING — port {self.port} opened but no ESP32 sync "
-                  f"bytes detected. The ESP32 may not be connected or transmitting.")
         
         self._stop_event.clear()
         self._running = True
@@ -236,13 +273,8 @@ class ESP32SerialAudioReceiver:
         if self._hb_thread is not None:
             self._hb_thread.join(timeout=2.0)
             self._hb_thread = None
-        
-        if self._serial is not None:
-            try:
-                self._serial.close()
-            except Exception:
-                pass
-            self._serial = None
+
+        self._close_serial()
         
         print(f"ESP32 Serial Audio: Stopped. Stats - Packets: {self.packets_received}, "
               f"Corrupted: {self.packets_corrupted}, Bytes: {self.bytes_received}")
@@ -313,8 +345,12 @@ class ESP32SerialAudioReceiver:
         """Background thread that continuously reads from serial port."""
         print("ESP32 Serial Audio: Receiver thread started")
 
-        while not self._stop_event.is_set() and self._serial is not None:
+        while not self._stop_event.is_set():
             try:
+                if self._serial is None:
+                    if not self._reconnect_serial():
+                        break
+
                 # Locate the sync pair 0xAA 0x55
                 if not self._find_sync():
                     continue
@@ -388,6 +424,8 @@ class ESP32SerialAudioReceiver:
             except Exception as e:
                 if not self._stop_event.is_set():
                     print(f"ESP32 Serial Audio: Error in receiver loop: {e}")
+                    if not self._reconnect_serial():
+                        break
                 time.sleep(0.1)
 
         print("ESP32 Serial Audio: Receiver thread stopped")
