@@ -42,6 +42,7 @@ RECORDINGS_DIR = os.path.join(ROOT_DIR, 'data', 'recordings')
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 
 OVERLAY_ONLY_DEFAULT = False  # Draw overlays on black background
+OVERLAY_PERSIST_SEC = 0.25  # Smooth transient detector misses in overlay-only mode
 
 
 def _log_system_diagnostics():
@@ -154,6 +155,8 @@ def recognize_face():
     presence_state = {}
     last_detected_ts = {}
     ABSENCE_GRACE_SEC = args.absence_grace_sec
+    last_overlay_draw_items = []
+    last_overlay_draw_ts = 0.0
 
     recognizer_cfg = RecognizerConfig(
         models_dir=MODELS_DIR,
@@ -709,6 +712,7 @@ def recognize_face():
                 break
 
         recognized_ids_in_frame = set()
+        overlay_draw_items = []
         if effective_mode != MODE_AUDIO:
             recognizer = _get_recognizer()
             faces_info = recognizer.detect_and_recognize(conn, frame) if recognizer is not None else []
@@ -782,23 +786,50 @@ def recognize_face():
                         if recognizer.maybe_add_embedding(conn, recognized_id, info.embedding, info.quality):
                             prune_embeddings_if_needed(conn, recognized_id, MAX_TEMPLATES_PER_PERSON)
 
-                cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
                 label = recognized_name
                 if recognized_id is not None and recognized_seen_count is not None:
                     label = f"{recognized_name} (seen {recognized_seen_count})"
-                cv2.putText(display_frame, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                last_label = None
+                prev_text = None
+                show_rec = False
                 if recognized_id is not None:
                     last_label = f"Last: {recognized_last_seen_str if recognized_last_seen_str else '—'}"
-                    cv2.putText(display_frame, last_label, (x, y+15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
                     prev_summary = prev_summaries.get(int(recognized_id), "")
                     if prev_summary:
                         prev_line = prev_summary
                         max_chars = 48
                         if len(prev_line) > max_chars:
                             prev_line = prev_line[: max_chars - 1].rstrip() + "…"
-                        cv2.putText(display_frame, f"Prev: {prev_line}", (x, y+30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+                        prev_text = f"Prev: {prev_line}"
                     if recognized_id in active_recorders and effective_mode == MODE_BOTH:
-                        cv2.putText(display_frame, "REC", (x, y+45), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                        show_rec = True
+
+                overlay_draw_items.append(
+                    {
+                        'rect': (x, y, w, h),
+                        'label': label,
+                        'last_label': last_label,
+                        'prev_text': prev_text,
+                        'show_rec': show_rec,
+                    }
+                )
+
+        if overlay_draw_items:
+            last_overlay_draw_items = [dict(item) for item in overlay_draw_items]
+            last_overlay_draw_ts = time.time()
+        elif args.overlay_only and last_overlay_draw_items and (time.time() - last_overlay_draw_ts) <= OVERLAY_PERSIST_SEC:
+            overlay_draw_items = last_overlay_draw_items
+
+        for item in overlay_draw_items:
+            x, y, w, h = item['rect']
+            cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+            cv2.putText(display_frame, item['label'], (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            if item['last_label']:
+                cv2.putText(display_frame, item['last_label'], (x, y+15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            if item['prev_text']:
+                cv2.putText(display_frame, item['prev_text'], (x, y+30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+            if item['show_rec']:
+                cv2.putText(display_frame, "REC", (x, y+45), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
         # Live transcription overlay (closed captioning)
         caption = None
