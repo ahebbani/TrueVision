@@ -76,12 +76,19 @@ static int32_t  i2s_raw[BUFFER_SIZE];
 static int16_t  pcm[BUFFER_SIZE];
 static uint8_t  pkt_buf[BUFFER_SIZE * 2 + 6];
 
+// ─── Debug LEDs ─────────────────────────────────────────────────────────────
+// Heartbeat LED to show firmware is running, and packet LED to show audio sends.
+#define LED_HEART_PIN 9
+#define LED_PKT_PIN   10
+
 // ─── State ───────────────────────────────────────────────────────────────────
 #define DEBOUNCE_MS 50
 
 static uint8_t  current_mode   = MODE_FACE;
 static uint8_t  last_mode_sent = MODE_FACE;
 static uint32_t btn_change_ms  = 0;
+static uint32_t last_heartbeat_ms = 0;
+static bool     heartbeat_state = false;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -134,6 +141,12 @@ void setup() {
     UARTSerial.begin(UART_BAUD, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
     delay(100);
 
+    // Debug LEDs
+    pinMode(LED_HEART_PIN, OUTPUT);
+    pinMode(LED_PKT_PIN, OUTPUT);
+    digitalWrite(LED_HEART_PIN, LOW);
+    digitalWrite(LED_PKT_PIN, LOW);
+
     // I2S microphone
     i2s_config_t cfg = {};
     cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX);
@@ -178,6 +191,14 @@ void loop() {
         send_mode(current_mode);
     }
 
+    // Heartbeat LED (non-blocking)
+    uint32_t now = millis();
+    if (now - last_heartbeat_ms >= 500) {
+        last_heartbeat_ms = now;
+        heartbeat_state = !heartbeat_state;
+        digitalWrite(LED_HEART_PIN, heartbeat_state ? HIGH : LOW);
+    }
+
     // ── Read I2S and send audio ──────────────────────────────────────────
     size_t bytes_read = 0;
     esp_err_t rc = i2s_read(I2S_PORT, i2s_raw, sizeof(i2s_raw),
@@ -194,5 +215,10 @@ void loop() {
     uint16_t audio_bytes = (uint16_t)(samples * sizeof(int16_t));
     size_t pkt_len = build_packet(pkt_buf, PKT_AUDIO,
                                   (const uint8_t *)pcm, audio_bytes);
+    // Pulse packet LED briefly to indicate a packet send
+    digitalWrite(LED_PKT_PIN, HIGH);
     UARTSerial.write(pkt_buf, pkt_len);
+    // short visible pulse without significantly delaying streaming
+    delayMicroseconds(2000);
+    digitalWrite(LED_PKT_PIN, LOW);
 }
