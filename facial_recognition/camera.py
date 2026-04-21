@@ -1,23 +1,24 @@
 from __future__ import annotations
 
+import cv2
 from picamera2 import Picamera2
 
 
 class PiCam2Capture:
     def __init__(self, width: int, height: int):
         self._picam2 = Picamera2()
-        # BGR888 delivers native BGR bytes — no colour conversion needed
-        # and avoids the RGB/BGR ambiguity that caused the blue-tint issue
-        # on Pi 5 with Trixie.
+        # Request RGB from Picamera2, then convert explicitly to BGR before
+        # returning frames. This keeps the OpenCV/dlib pipeline deterministic
+        # across Picamera2/libcamera variants.
         config = self._picam2.create_preview_configuration(
-            main={"size": (width, height), "format": "BGR888"}
+            main={"size": (width, height), "format": "RGB888"}
         )
         self._picam2.configure(config)
         self._picam2.start()
 
     def read(self):
-        arr = self._picam2.capture_array()  # already BGR
-        return True, arr
+        arr = self._picam2.capture_array()
+        return True, cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
 
     def isOpened(self):
         return True

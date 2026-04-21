@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -39,6 +40,8 @@ class FaceInfo:
 
 
 class Recognizer:
+    _DB_CACHE_TTL_SEC = 1.0
+
     def __init__(self, cfg: RecognizerConfig):
         self.cfg = cfg
         self.detector = dlib.get_frontal_face_detector()
@@ -51,22 +54,52 @@ class Recognizer:
 
         self.predictor = dlib.shape_predictor(self.predictor_path)
         self.face_rec_model = dlib.face_recognition_model_v1(self.face_model_path)
+        self.selected_detector_mode = self._resolve_detector_mode()
         self.cnn_detector = None
-        if self.cfg.detector_mode in ('auto', 'cnn') and os.path.exists(self.cnn_path):
+        if self.selected_detector_mode == 'cnn' and os.path.exists(self.cnn_path):
             try:
                 self.cnn_detector = dlib.cnn_face_detection_model_v1(self.cnn_path)
             except Exception:
                 self.cnn_detector = None
+                self.selected_detector_mode = 'hog'
 
         self._last_added_ts: Dict[int, float] = {}
+        self._emb_cache: Optional[Dict[int, List[np.ndarray]]] = None
+        self._meta_cache: Optional[Dict[int, Tuple[str, Optional[int], Optional[str]]]] = None
+        self._db_cache_loaded_at = 0.0
+
+    def _resolve_detector_mode(self) -> str:
+        if self.cfg.detector_mode in ('hog', 'cnn'):
+            return self.cfg.detector_mode
+
+        machine = platform.machine().lower()
+        system = platform.system().lower()
+        if system == 'linux' and ('arm' in machine or 'aarch64' in machine):
+            return 'hog'
+        if os.path.exists(self.cnn_path):
+            return 'cnn'
+        return 'hog'
 
     def _detect(self, gray) -> List[dlib.rectangle]:
-        if self.cnn_detector is not None and self.cfg.detector_mode in ('auto', 'cnn'):
+        if self.cnn_detector is not None and self.selected_detector_mode == 'cnn':
             dets = self.cnn_detector(gray, 1)
             return [d.rect for d in dets]
         return list(self.detector(gray))
 
+    def _invalidate_db_cache(self) -> None:
+        self._emb_cache = None
+        self._meta_cache = None
+        self._db_cache_loaded_at = 0.0
+
     def _load_db_cache(self, cursor) -> Tuple[Dict[int, List[np.ndarray]], Dict[int, Tuple[str, Optional[int], Optional[str]]]]:
+        now = time.time()
+        if (
+            self._emb_cache is not None
+            and self._meta_cache is not None
+            and (now - self._db_cache_loaded_at) <= self._DB_CACHE_TTL_SEC
+        ):
+            return self._emb_cache, self._meta_cache
+
         cursor.execute(
             """
             SELECT fe.face_id, f.name, fe.embedding, f.seen_count, f.last_seen_at
@@ -81,6 +114,9 @@ class Recognizer:
             emb = np.frombuffer(db_embedding, dtype=np.float64)
             embeddings_by_person.setdefault(person_id, []).append(emb)
             meta_by_person[person_id] = (name, db_seen_count, db_last_seen_at)
+        self._emb_cache = embeddings_by_person
+        self._meta_cache = meta_by_person
+        self._db_cache_loaded_at = now
         return embeddings_by_person, meta_by_person
 
     def detect_and_recognize(self, conn, frame_bgr) -> List[FaceInfo]:
@@ -141,6 +177,7 @@ class Recognizer:
             (person_id,),
         )
         conn.commit()
+        self._invalidate_db_cache()
 
     def maybe_add_embedding(self, conn, person_id: int, emb_live: np.ndarray, quality: Optional[float]):
         cur = conn.cursor()
@@ -195,6 +232,7 @@ class Recognizer:
             )
             conn.commit()
             self._last_added_ts[person_id] = now_add
+            self._invalidate_db_cache()
             if self.cfg.verbose:
                 print(f"[templates] added template for person {person_id} (quality={quality:.1f})")
             return True

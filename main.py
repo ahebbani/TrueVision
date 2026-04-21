@@ -42,7 +42,7 @@ RECORDINGS_DIR = os.path.join(ROOT_DIR, 'data', 'recordings')
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 
 OVERLAY_ONLY_DEFAULT = False  # Draw overlays on black background
-OVERLAY_PERSIST_SEC = 0.25  # Smooth transient detector misses in overlay-only mode
+OVERLAY_PERSIST_SEC = 0.25  # Smooth transient detector misses in the on-screen overlay
 
 
 def _log_system_diagnostics():
@@ -817,7 +817,7 @@ def recognize_face():
         if overlay_draw_items:
             last_overlay_draw_items = [dict(item) for item in overlay_draw_items]
             last_overlay_draw_ts = time.time()
-        elif args.overlay_only and last_overlay_draw_items and (time.time() - last_overlay_draw_ts) <= OVERLAY_PERSIST_SEC:
+        elif last_overlay_draw_items and (time.time() - last_overlay_draw_ts) <= OVERLAY_PERSIST_SEC:
             overlay_draw_items = last_overlay_draw_items
 
         for item in overlay_draw_items:
