@@ -42,7 +42,7 @@ If dependencies (faster-whisper) are missing, the app continues with transcripti
 From repo root:
 
 ```bash
-python main.py
+make run
 ```
 
 Press `q` to quit.

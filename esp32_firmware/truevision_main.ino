@@ -16,34 +16,39 @@
  *   0x01  AUDIO_DATA    raw int16 PCM at 16 kHz mono
  *   0x02  MODE_CHANGE   1-byte: 0x00=AUDIO, 0x01=FACE
  *
- * Button wiring:
- *   GPIO 22 → one leg of momentary push-button
- *   GND     → other leg
- *   (uses INPUT_PULLUP — no external resistor needed)
+ * Mode switch wiring:
+ *   GPIO 35 → one side of two-position mode switch
+ *   GPIO 36 → other side of two-position mode switch
+ *   (external wiring should assert the selected side; pins 35/36 are
+ *    input-only on many ESP32 modules so provide external pull-ups/downs)
  *
- *   Released (HIGH) = FACE mode
- *   Pressed  (LOW)  = AUDIO mode
+ *   When the switch selects the AUDIO side the board announces AUDIO mode
+ *   When the switch selects the FACE side the board announces FACE mode
  *
- * I2S Microphone wiring:
- *   SCK  (BCLK)  → GPIO 16
- *   WS   (LRCLK) → GPIO 17
- *   SD   (DOUT)  → GPIO 5
+ * I2S Microphone wiring (updated):
+ *   SCK  (BCLK)  → GPIO 8
+ *   WS   (LRCLK) → GPIO 6
+ *   SD   (DOUT)  → GPIO 7
  *   SEL/LR       → GND
  *   VDD → 3.3V, GND → GND
  *
- * UART:
- *   ESP32 TX (GPIO 1) → Pi RX (physical pin 10 / GPIO 15)
+ * UART (updated):
+ *   ESP32 TX (GPIO 17) → Pi RX
+ *   ESP32 RX (GPIO 18) ← Pi TX
  *   ESP32 GND          → Pi GND
  */
 
 #include <driver/i2s.h>
 
 // ─── Pins ────────────────────────────────────────────────────────────────────
-#define MODE_BUTTON_PIN   22
+// Two-pin mode switch (either side indicates the selected mode)
+#define MODE_SWITCH_A_PIN 35
+#define MODE_SWITCH_B_PIN 36
 
-#define I2S_SCK_PIN       16
-#define I2S_WS_PIN        17
-#define I2S_SD_PIN        5
+// I2S microphone (updated pins)
+#define I2S_SCK_PIN       8
+#define I2S_WS_PIN        6
+#define I2S_SD_PIN        7
 
 // ─── I2S ─────────────────────────────────────────────────────────────────────
 #define I2S_PORT          I2S_NUM_0
@@ -53,7 +58,10 @@
 
 // ─── UART ────────────────────────────────────────────────────────────────────
 #define UART_BAUD         921600
-static HardwareSerial &UART0 = Serial0;
+// Use a hardware serial instance that can be bound to arbitrary TX/RX pins
+#define UART_TX_PIN       17
+#define UART_RX_PIN       18
+HardwareSerial UARTSerial(2);
 
 // ─── Protocol ────────────────────────────────────────────────────────────────
 #define SYNC_1            0xAA
@@ -69,10 +77,11 @@ static int16_t  pcm[BUFFER_SIZE];
 static uint8_t  pkt_buf[BUFFER_SIZE * 2 + 6];
 
 // ─── State ───────────────────────────────────────────────────────────────────
-static uint8_t  current_mode   = MODE_FACE;
-static bool     btn_last       = true;   // HIGH = released (pullup)
-static uint32_t btn_change_ms  = 0;
 #define DEBOUNCE_MS 50
+
+static uint8_t  current_mode   = MODE_FACE;
+static uint8_t  last_mode_sent = MODE_FACE;
+static uint32_t btn_change_ms  = 0;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -97,19 +106,32 @@ static void send_mode(uint8_t mode) {
     uint8_t buf[8];
     uint8_t payload = mode;
     size_t len = build_packet(buf, PKT_MODE_CHANGE, &payload, 1);
-    UART0.write(buf, len);
+    UARTSerial.write(buf, len);
 }
 
 // ─── setup() ─────────────────────────────────────────────────────────────────
 
 void setup() {
-    // Button
-    pinMode(MODE_BUTTON_PIN, INPUT_PULLUP);
-    btn_last = (digitalRead(MODE_BUTTON_PIN) == HIGH);
-    current_mode = btn_last ? MODE_FACE : MODE_AUDIO;
+    // Two-pin mode switch
+    // Pins 35/36 are input-only on many ESP32s; rely on external wiring for pull-ups/downs.
+    pinMode(MODE_SWITCH_A_PIN, INPUT);
+    pinMode(MODE_SWITCH_B_PIN, INPUT);
+    // Initialize current mode from switch state; prefer explicit pin assertions.
+    bool a = digitalRead(MODE_SWITCH_A_PIN);
+    bool b = digitalRead(MODE_SWITCH_B_PIN);
+    if (a && !b) {
+        current_mode = MODE_AUDIO;
+    } else if (b && !a) {
+        current_mode = MODE_FACE;
+    } else {
+        // ambiguous: keep FACE as default
+        current_mode = MODE_FACE;
+    }
+    last_mode_sent = current_mode;
 
     // UART
-    UART0.begin(UART_BAUD);
+    // Initialize UART on requested pins (RX, TX)
+    UARTSerial.begin(UART_BAUD, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
     delay(100);
 
     // I2S microphone
@@ -140,16 +162,20 @@ void setup() {
 // ─── loop() ──────────────────────────────────────────────────────────────────
 
 void loop() {
-    // ── Check button ─────────────────────────────────────────────────────
-    bool btn_now = (digitalRead(MODE_BUTTON_PIN) == HIGH);
-    if (btn_now != btn_last && (millis() - btn_change_ms) > DEBOUNCE_MS) {
-        btn_last = btn_now;
+    // ── Check two-pin mode switch ────────────────────────────────────────
+    bool a = digitalRead(MODE_SWITCH_A_PIN);
+    bool b = digitalRead(MODE_SWITCH_B_PIN);
+    uint8_t new_mode = current_mode;
+    // Priority: if A asserted -> AUDIO; else if B asserted -> FACE; else keep current
+    if (a && !b) {
+        new_mode = MODE_AUDIO;
+    } else if (b && !a) {
+        new_mode = MODE_FACE;
+    }
+    if (new_mode != current_mode && (millis() - btn_change_ms) > DEBOUNCE_MS) {
+        current_mode = new_mode;
         btn_change_ms = millis();
-        uint8_t new_mode = btn_now ? MODE_FACE : MODE_AUDIO;
-        if (new_mode != current_mode) {
-            current_mode = new_mode;
-            send_mode(current_mode);
-        }
+        send_mode(current_mode);
     }
 
     // ── Read I2S and send audio ──────────────────────────────────────────
@@ -168,5 +194,5 @@ void loop() {
     uint16_t audio_bytes = (uint16_t)(samples * sizeof(int16_t));
     size_t pkt_len = build_packet(pkt_buf, PKT_AUDIO,
                                   (const uint8_t *)pcm, audio_bytes);
-    UART0.write(pkt_buf, pkt_len);
+    UARTSerial.write(pkt_buf, pkt_len);
 }
