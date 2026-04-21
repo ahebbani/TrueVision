@@ -1,4 +1,4 @@
-.PHONY: help run run-audio run-face run-esp32 run-esp32-force-both models fetch-models venv run-server run-server-dev setup-pi setup-server server-status backfill-trigger db db-report
+.PHONY: help run run-test run-audio run-face run-overlay run-esp32 run-esp32-force-both models fetch-models venv run-server run-server-dev setup-pi setup-server server-status backfill-trigger db db-report
 
 # DB report defaults
 DB_REPORT_LIMIT ?= 100
@@ -27,9 +27,11 @@ endif
 
 help:
 	@echo "Targets:"
-	@echo "  run                 - Run full system; mode switch is honored, BOTH needs server"
+	@echo "  run                 - Run with automatic device detection (Pi camera/ESP32 on Pi, webcam face mode on desktop)"
+	@echo "  run-test            - Alias for plain main.py runtime"
 	@echo "  run-audio           - Force audio-only mode"
 	@echo "  run-face            - Force face-only mode"
+	@echo "  run-overlay         - Force face-only overlay mode"
 	@echo "  run-esp32           - Run with ESP32 UART audio; firmware mode packets are honored"
 	@echo "  run-esp32-force-both - Request BOTH; actual BOTH requires reachable server"
 	@echo "  run-server          - Start TrueVision server (transcription + summarization)"
@@ -44,7 +46,7 @@ help:
 
 # Run commands to test all or parts of the codebase
 run:
-	$(PY) main.py --overlay-only
+	$(PY) main.py
 
 run-test:
 	$(PY) main.py

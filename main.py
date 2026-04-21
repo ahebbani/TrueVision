@@ -144,7 +144,7 @@ def recognize_face():
 
     cap = open_camera(args.camera_width, args.camera_height)
     if cap is None:
-        print("ERROR: Could not open camera. Ensure Picamera2 is installed and the RPi camera is connected.")
+        print("ERROR: Could not open a camera backend. Check the Pi camera or your desktop webcam.")
         return
     print("Press 'q' to quit.")
 
@@ -266,19 +266,23 @@ def recognize_face():
 
     # Wire up callbacks on the shared receiver for ESP32 mode/marker events.
     _esp32_receiver = None
-    try:
-        from audio_analysis.transcription import get_shared_receiver
-        _esp32_receiver = get_shared_receiver(
-            serial_port=args.serial_port,
-            serial_baud=args.serial_baud,
-            on_mode_change=_on_mode_change,
-            on_marker=_on_marker,
-        )
-        if forced_mode is not None:
-            print(f"ESP32: Pi-side forced mode {_mode_label(forced_mode)}")
-        print(f"ESP32: Receiver initialised on {args.serial_port}")
-    except Exception as _recv_err:
-        print(f"WARNING: ESP32 not detected on {args.serial_port} — running without ESP32 integration")
+    esp32_port_exists = bool(args.serial_port) and os.path.exists(args.serial_port)
+    if esp32_port_exists:
+        try:
+            from audio_analysis.transcription import get_shared_receiver
+            _esp32_receiver = get_shared_receiver(
+                serial_port=args.serial_port,
+                serial_baud=args.serial_baud,
+                on_mode_change=_on_mode_change,
+                on_marker=_on_marker,
+            )
+            if forced_mode is not None:
+                print(f"ESP32: Pi-side forced mode {_mode_label(forced_mode)}")
+            print(f"ESP32: Receiver initialised on {args.serial_port}")
+        except Exception as _recv_err:
+            print(f"WARNING: ESP32 not detected on {args.serial_port} — running without ESP32 integration")
+    else:
+        print(f"ESP32: Serial port {args.serial_port} not present; integration disabled")
 
     transcriber: Optional[object] = None
     if Transcriber is not None:
