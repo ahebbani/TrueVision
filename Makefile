@@ -55,6 +55,9 @@ run-audio:
 run-face:
 	$(PY) main.py --serial-baud 921600 --force-mode face
 
+run-overlay:
+	$(PY) main.py --force-mode face --overlay-only
+
 run-esp32:
 	$(PY) main.py --serial-baud 921600
 
