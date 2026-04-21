@@ -133,6 +133,7 @@ def parse_args():
 
 def recognize_face():
     args = parse_args()
+    window_name = "Face Recognition"
 
     _log_system_diagnostics()
 
@@ -145,6 +146,10 @@ def recognize_face():
         print("ERROR: Could not open camera. Ensure Picamera2 is installed and the RPi camera is connected.")
         return
     print("Press 'q' to quit.")
+
+    if args.overlay_only:
+        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
     presence_state = {}
     last_detected_ts = {}
@@ -854,7 +859,7 @@ def recognize_face():
                     if pid in active_recorders:
                         _stop_session(pid)
 
-        cv2.imshow("Face Recognition", display_frame)
+        cv2.imshow(window_name, display_frame)
         key = cv2.waitKey(1)
         if key == ord('q'):
             break
