@@ -8,7 +8,7 @@ DB_REPORT_LIMIT ?= 100
 # discovery for `TrueVision Server._truevision._tcp.local.` on the local LAN.
 # Example explicit override:
 #   make run TRUEVISION_SERVER_URL=http://dgx-spark.local:8008
-TRUEVISION_SERVER_URL ?=
+TRUEVISION_SERVER_URL ?= http://10.186.71.82:8008
 TRUEVISION_SERVER_PORT ?= 8008
 export TRUEVISION_SERVER_URL
 export TRUEVISION_SERVER_PORT
