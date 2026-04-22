@@ -13,7 +13,10 @@ from summarization.text import clamp_summary_one_sentence
 
 @dataclass
 class RemoteSummarizerConfig:
-    url: str = os.environ.get("SUMMARIZER_URL", "").rstrip("/")
+    url: str = (
+        os.environ.get("SUMMARIZER_URL", "")
+        or os.environ.get("TRUEVISION_SERVER_URL", "")
+    ).rstrip("/")
     timeout_sec: float = float(os.environ.get("SUMMARIZER_TIMEOUT_SEC", "8"))
     max_chars: int = int(os.environ.get("SUMMARIZER_MAX_CHARS", "140"))
 
@@ -31,7 +34,7 @@ def remote_summarize_one_sentence(
 ) -> str:
     cfg = cfg or RemoteSummarizerConfig()
     if not cfg.url:
-        raise RemoteSummarizerError("SUMMARIZER_URL is not set")
+        raise RemoteSummarizerError("SUMMARIZER_URL / TRUEVISION_SERVER_URL is not set")
 
     payload = {
         "transcript": transcript or "",

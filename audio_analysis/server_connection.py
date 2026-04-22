@@ -48,6 +48,7 @@ class ServerConnection:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._server_info: dict = {}
+        self._discovered_via_mdns = False
 
     # ── Public properties ────────────────────────────────────────────────
 
@@ -95,11 +96,27 @@ class ServerConnection:
             self._try_mdns_discovery()
         if self._url:
             available = self._ping(self._url)
+            if not available and not self._explicit_url:
+                with self._lock:
+                    self._url = None
+                self._try_mdns_discovery()
+                if self._url:
+                    available = self._ping(self._url)
             with self._lock:
                 self._available = available
             return available
         with self._lock:
             self._available = False
+        return False
+
+    def check_with_retries(self, attempts: int = 3, delay_sec: float = 2.0) -> bool:
+        """Probe the server a few times before giving up."""
+        attempts = max(1, int(attempts))
+        for attempt in range(1, attempts + 1):
+            if self.check():
+                return True
+            if attempt < attempts:
+                time.sleep(max(0.0, delay_sec))
         return False
 
     # ── Internal ─────────────────────────────────────────────────────────
@@ -153,6 +170,7 @@ class ServerConnection:
             if found_url:
                 with self._lock:
                     self._url = found_url
+                    self._discovered_via_mdns = True
                 print(f"[server_connection] Discovered server via mDNS: {found_url}")
 
         except ImportError:

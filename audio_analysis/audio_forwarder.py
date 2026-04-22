@@ -24,6 +24,8 @@ class AudioForwarder:
 
     # How often (seconds) to read from the serial receiver and forward
     FORWARD_INTERVAL = 0.032  # ~32 ms = one ESP32 audio packet
+    RECONNECT_ATTEMPTS = 3
+    RECONNECT_BACKOFF_SEC = 2.0
 
     def __init__(self, ws_url: str, serial_receiver):
         """
@@ -49,6 +51,8 @@ class AudioForwarder:
         self._captions: Dict[int, str] = {}
         self._results: Dict[int, dict] = {}  # session_key → {transcript, summary, meeting_id}
         self._last_read_pos = 0  # bytes already forwarded from receiver buffer
+        self._reconnect_failures = 0
+        self._retry_exhausted = False
 
     # ── Public API ───────────────────────────────────────────────────────
 
@@ -56,10 +60,16 @@ class AudioForwarder:
     def is_connected(self) -> bool:
         return self._connected.is_set()
 
+    @property
+    def retry_exhausted(self) -> bool:
+        return self._retry_exhausted
+
     def start(self) -> None:
         if self._thread is not None:
             return
         self._stop.clear()
+        self._retry_exhausted = False
+        self._reconnect_failures = 0
         self._thread = threading.Thread(target=self._ws_run, daemon=True,
                                         name="audio-fwd-ws")
         self._thread.start()
@@ -130,10 +140,25 @@ class AudioForwarder:
                 print(f"[audio_forwarder] WebSocket error: {e}")
             self._connected.clear()
             if not self._stop.is_set():
-                time.sleep(2.0)  # backoff before reconnect
+                self._reconnect_failures += 1
+                if self._reconnect_failures >= self.RECONNECT_ATTEMPTS:
+                    self._retry_exhausted = True
+                    print(
+                        "[audio_forwarder] Reconnect attempts exhausted; "
+                        "waiting for the next server health cycle"
+                    )
+                    break
+                print(
+                    f"[audio_forwarder] Reconnect attempt "
+                    f"{self._reconnect_failures + 1}/{self.RECONNECT_ATTEMPTS} "
+                    f"in {self.RECONNECT_BACKOFF_SEC:.1f}s"
+                )
+                time.sleep(self.RECONNECT_BACKOFF_SEC)
 
     def _on_open(self, ws) -> None:
         self._connected.set()
+        self._reconnect_failures = 0
+        self._retry_exhausted = False
         print(f"[audio_forwarder] Connected to {self._ws_url}")
         # Start the audio forwarding thread
         self._forward_thread = threading.Thread(

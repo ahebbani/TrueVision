@@ -18,6 +18,9 @@ import signal
 import subprocess
 import sys
 import time
+import json
+import urllib.error
+import urllib.request
 from datetime import datetime
 from typing import Optional
 
@@ -127,8 +130,12 @@ def parse_args():
                         'Enables dual-mode: face recognition on Pi + audio on server.')
     p.add_argument('--no-server', action='store_true',
                    help='Disable server connection entirely (force local-only mode)')
-    p.add_argument('--server-check-interval', type=float, default=30.0,
+    p.add_argument('--server-check-interval', type=float, default=5.0,
                    help='Seconds between server availability re-checks (default: %(default)s)')
+    p.add_argument('--server-connect-retries', type=int, default=3,
+                   help='How many startup connection attempts to make before reporting no server found')
+    p.add_argument('--server-retry-delay', type=float, default=2.0,
+                   help='Seconds to wait between startup server connection attempts')
     return p.parse_args()
 
 
@@ -312,24 +319,38 @@ def recognize_face():
 
     if not getattr(args, 'no_server', False):
         server_url = getattr(args, 'server_url', '') or ''
-        if server_url or os.environ.get('TRUEVISION_SERVER_URL', ''):
-            try:
-                from audio_analysis.server_connection import ServerConnection
-                server_conn = ServerConnection(
-                    url=server_url or None,
-                    check_interval_sec=getattr(args, 'server_check_interval', 30.0),
-                    timeout_sec=3.0,
-                )
-                # Do a synchronous initial check
-                if server_conn.check():
-                    print(f"Server available: {server_conn.url}")
-                    _server_offload_active = True
+        try:
+            from audio_analysis.server_connection import ServerConnection
+            server_conn = ServerConnection(
+                url=server_url or None,
+                check_interval_sec=getattr(args, 'server_check_interval', 5.0),
+                timeout_sec=3.0,
+            )
+            # Do a synchronous initial check with a few quick retries so make run
+            # reports a clear startup result before falling back to local mode.
+            if server_conn.check_with_retries(
+                attempts=max(1, int(getattr(args, 'server_connect_retries', 3))),
+                delay_sec=max(0.0, float(getattr(args, 'server_retry_delay', 2.0))),
+            ):
+                print(f"Server available: {server_conn.url}")
+                _server_offload_active = True
+            else:
+                configured_url = server_url or os.environ.get('TRUEVISION_SERVER_URL', '')
+                if configured_url:
+                    print(
+                        f"No server found at {configured_url} after "
+                        f"{max(1, int(getattr(args, 'server_connect_retries', 3)))} attempts "
+                        "— running in local-only mode"
+                    )
                 else:
-                    print("Server not available — running in local-only mode")
-                server_conn.start()
-            except Exception as e:
-                print(f"WARNING: Server connection init failed ({e}). Running local-only.")
-                server_conn = None
+                    print(
+                        f"No server found after {max(1, int(getattr(args, 'server_connect_retries', 3)))} attempts "
+                        "(checked configured URL/mDNS) — running in local-only mode"
+                    )
+            server_conn.start()
+        except Exception as e:
+            print(f"WARNING: Server connection init failed ({e}). Running local-only.")
+            server_conn = None
 
     def _ensure_audio_forwarder():
         """Create the AudioForwarder if server is available and ESP32 receiver exists."""
@@ -352,6 +373,35 @@ def recognize_face():
         except Exception as e:
             print(f"WARNING: AudioForwarder init failed ({e}).")
             return None
+
+    def _remote_summarizer_cfg():
+        if server_conn is None or not server_conn.url:
+            return None
+        try:
+            from summarization.remote_client import RemoteSummarizerConfig
+            return RemoteSummarizerConfig(url=server_conn.url)
+        except Exception:
+            return None
+
+    def _fetch_server_meeting_result(meeting_id: int) -> Optional[dict]:
+        if server_conn is None or not server_conn.url:
+            return None
+        req = urllib.request.Request(
+            f"{server_conn.url}/api/meetings/{int(meeting_id)}/status",
+            method='GET',
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                payload = json.loads(resp.read().decode('utf-8', errors='replace'))
+        except (urllib.error.URLError, ValueError, OSError):
+            return None
+        if payload.get('status') != 'done':
+            return None
+        return {
+            'meeting_id': payload.get('meeting_id'),
+            'transcript': payload.get('transcript', '') or '',
+            'summary': payload.get('summary', '') or '',
+        }
 
     def _start_session(session_key: int, *, person_id: Optional[int], label_prefix: str) -> None:
         if create_recorder is None or session_key in active_recorders:
@@ -450,6 +500,8 @@ def recognize_face():
                     # Wait up to 30s for the server to respond via the WebSocket result
                     for _ in range(60):
                         result = audio_forwarder.get_result(sk)
+                        if result is None:
+                            result = _fetch_server_meeting_result(mid)
                         if result is not None:
                             c2 = _open_db(db_path)
                             c2.execute(
@@ -540,6 +592,7 @@ def recognize_face():
                                 previous_summary=prev_summary,
                                 person_name=person_name,
                                 max_chars=int(max_chars),
+                                cfg=_remote_summarizer_cfg(),
                             )
                         except Exception:
                             summary = ""
@@ -605,6 +658,7 @@ def recognize_face():
                                 previous_summary=prev_summary,
                                 person_name=person_name,
                                 max_chars=int(getattr(args, 'summary_max_chars', 140)),
+                                cfg=_remote_summarizer_cfg(),
                             )
                         except Exception as e:
                             print(f"Remote summarizer failed; falling back: {e}")
@@ -688,6 +742,15 @@ def recognize_face():
                         audio_forwarder = None
                     # Re-apply mode so ESP32 gating takes effect again
                     applied_mode = None
+                elif (
+                    _server_offload_active
+                    and audio_forwarder is not None
+                    and getattr(audio_forwarder, 'retry_exhausted', False)
+                ):
+                    print("AudioForwarder: reconnect attempts exhausted — retrying on next health cycle")
+                    audio_forwarder.stop()
+                    audio_forwarder = None
+                    _ensure_audio_forwarder()
 
         ret, frame = cap.read()
         if not ret:

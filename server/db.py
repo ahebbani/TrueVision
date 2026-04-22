@@ -57,6 +57,20 @@ def create_job(conn: sqlite3.Connection, meeting_id: int, audio_path: str) -> in
     return cur.lastrowid  # type: ignore[return-value]
 
 
+def store_meeting_result(conn: sqlite3.Connection, meeting_id: int, *,
+                         transcript: str = "",
+                         summary: str = "",
+                         status: str = "done",
+                         error: Optional[str] = None) -> int:
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO jobs (meeting_id, audio_path, status, transcript, summary, error) VALUES (?, NULL, ?, ?, ?, ?)",
+        (meeting_id, status, transcript, summary, error),
+    )
+    conn.commit()
+    return cur.lastrowid  # type: ignore[return-value]
+
+
 def get_job_by_meeting(conn: sqlite3.Connection, meeting_id: int):
     cur = conn.cursor()
     cur.execute(

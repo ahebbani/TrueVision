@@ -3,20 +3,23 @@
 # DB report defaults
 DB_REPORT_LIMIT ?= 100
 
-# Remote summarizer (FastAPI + Ollama). For local testing we default to localhost.
-# Override/disable with: `make run SUMMARIZER_URL=`
-SUMMARIZER_URL ?= http://127.0.0.1:8008
-SUMMARIZER_TIMEOUT_SEC ?= 8
-export SUMMARIZER_URL
-export SUMMARIZER_TIMEOUT_SEC
-
 # TrueVision server (transcription + summarization offload).
-# Set on the Pi side to enable server offloading:
-#   make run-esp32 TRUEVISION_SERVER_URL=http://192.168.1.100:8008
+# On the Pi, `make run` will use this URL if set; otherwise it will try mDNS
+# discovery for `TrueVision Server._truevision._tcp.local.` on the local LAN.
+# Example explicit override:
+#   make run TRUEVISION_SERVER_URL=http://dgx-spark.local:8008
 TRUEVISION_SERVER_URL ?=
 TRUEVISION_SERVER_PORT ?= 8008
 export TRUEVISION_SERVER_URL
 export TRUEVISION_SERVER_PORT
+
+# Remote summarizer endpoint. By default this follows the main TrueVision
+# server URL so LLM summarization stays on the server side.
+# Override/disable with: `make run SUMMARIZER_URL=`
+SUMMARIZER_URL ?= $(TRUEVISION_SERVER_URL)
+SUMMARIZER_TIMEOUT_SEC ?= 8
+export SUMMARIZER_URL
+export SUMMARIZER_TIMEOUT_SEC
 
 VENV_PY := .venv/bin/python
 ifeq ($(wildcard $(VENV_PY)), $(VENV_PY))
@@ -27,7 +30,7 @@ endif
 
 help:
 	@echo "Targets:"
-	@echo "  run                 - Run with automatic device detection (Pi camera/ESP32 on Pi, webcam face mode on desktop)"
+	@echo "  run                 - Run with automatic device detection and server offload if configured/discovered"
 	@echo "  run-test            - Alias for plain main.py runtime"
 	@echo "  run-audio           - Force audio-only mode"
 	@echo "  run-face            - Force face-only mode"

@@ -192,6 +192,7 @@ async def ws_audio(ws: WebSocket):
 
                     elif msg_type == "session_end":
                         sk = int(ctrl.get("session_key", current_session_key or 0))
+                        meeting_id = ctrl.get("meeting_id")
                         # Run final transcription + summarization
                         loop = asyncio.get_event_loop()
                         transcript = await loop.run_in_executor(
@@ -207,10 +208,23 @@ async def ws_audio(ws: WebSocket):
                                 ctrl.get("person_name"),
                                 int(ctrl.get("max_chars", 140)),
                             )
+                        if meeting_id is not None:
+                            try:
+                                conn = server_db.open_db()
+                                server_db.store_meeting_result(
+                                    conn,
+                                    int(meeting_id),
+                                    transcript=transcript,
+                                    summary=summary,
+                                    status="done",
+                                )
+                                conn.close()
+                            except Exception as e:
+                                print(f"[ws/audio] Failed to persist meeting result {meeting_id}: {e}")
                         await ws.send_text(json.dumps({
                             "type": "result",
                             "session_key": sk,
-                            "meeting_id": ctrl.get("meeting_id"),
+                            "meeting_id": meeting_id,
                             "transcript": transcript,
                             "summary": summary,
                         }))
