@@ -12,7 +12,7 @@ class ServerConfig:
 
     # Whisper (transcription)
     whisper_model: str = os.environ.get("WHISPER_MODEL", "small")
-    whisper_device: str = os.environ.get("WHISPER_DEVICE", "cuda")
+    whisper_device: str = os.environ.get("WHISPER_DEVICE", "auto")
     whisper_compute_type: str = os.environ.get("WHISPER_COMPUTE_TYPE", "float16")
     caption_interval_sec: float = float(os.environ.get("CAPTION_INTERVAL_SEC", "0.7"))
 

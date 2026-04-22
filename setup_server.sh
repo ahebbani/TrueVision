@@ -57,6 +57,8 @@ else
     echo "Set WHISPER_DEVICE=cpu in your environment."
 fi
 
+export WHISPER_DEVICE="${WHISPER_DEVICE:-auto}"
+
 # ── Step 3: Python venv ──────────────────────────────────────────────────────
 
 echo ""
@@ -177,7 +179,7 @@ echo "║    make run-server-dev                                   ║"
 echo "║                                                         ║"
 echo "║  Environment variables:                                  ║"
 echo "║    WHISPER_MODEL     (default: small)                    ║"
-echo "║    WHISPER_DEVICE    (default: cuda)                     ║"
+echo "║    WHISPER_DEVICE    (default: auto)                     ║"
 echo "║    OLLAMA_MODEL      (default: llama3.1:8b)              ║"
 echo "║    TRUEVISION_SERVER_PORT (default: 8008)                ║"
 echo "╚══════════════════════════════════════════════════════════╝"

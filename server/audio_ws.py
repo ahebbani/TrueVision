@@ -63,6 +63,8 @@ class AudioTranscriptionHandler:
         self._model: Optional[WhisperModel] = None  # type: ignore[assignment]
         self._model_lock = threading.Lock()
         self._sessions: Dict[int, _AudioSession] = {}
+        self._effective_device = cfg.whisper_device
+        self._effective_compute_type = cfg.whisper_compute_type
 
     # ── Lazy model init ───────────────────────────────────────────────────
 
@@ -74,13 +76,62 @@ class AudioTranscriptionHandler:
                 return
             if WhisperModel is None:
                 raise RuntimeError("faster-whisper is not installed on the server")
-            print(f"[audio_ws] Loading Whisper model={self.cfg.whisper_model} "
-                  f"device={self.cfg.whisper_device} compute={self.cfg.whisper_compute_type}")
-            self._model = WhisperModel(
-                self.cfg.whisper_model,
-                device=self.cfg.whisper_device,
-                compute_type=self.cfg.whisper_compute_type,
+            for device, compute_type in self._candidate_model_configs():
+                print(
+                    f"[audio_ws] Loading Whisper model={self.cfg.whisper_model} "
+                    f"device={device} compute={compute_type}"
+                )
+                try:
+                    self._model = WhisperModel(
+                        self.cfg.whisper_model,
+                        device=device,
+                        compute_type=compute_type,
+                    )
+                    self._effective_device = device
+                    self._effective_compute_type = compute_type
+                    self.cfg.whisper_device = device
+                    self.cfg.whisper_compute_type = compute_type
+                    return
+                except ValueError as exc:
+                    if not self._is_cuda_backend_error(exc):
+                        raise
+                    print(
+                        f"[audio_ws] CUDA backend unavailable for faster-whisper: {exc}. "
+                        "Falling back to CPU."
+                    )
+                    continue
+
+            raise RuntimeError(
+                "Unable to initialize faster-whisper with any supported device configuration"
             )
+
+    def _candidate_model_configs(self) -> list[tuple[str, str]]:
+        requested_device = (self.cfg.whisper_device or "auto").strip().lower()
+        requested_compute = (self.cfg.whisper_compute_type or "float16").strip().lower()
+
+        if requested_device == "cpu":
+            return [("cpu", self._cpu_compute_type(requested_compute))]
+        if requested_device == "cuda":
+            return [
+                ("cuda", requested_compute),
+                ("cpu", self._cpu_compute_type(requested_compute)),
+            ]
+
+        return [
+            ("cuda", requested_compute),
+            ("cpu", self._cpu_compute_type(requested_compute)),
+        ]
+
+    @staticmethod
+    def _cpu_compute_type(requested_compute: str) -> str:
+        if requested_compute in {"float16", "int8_float16"}:
+            return "int8"
+        return requested_compute or "int8"
+
+    @staticmethod
+    def _is_cuda_backend_error(exc: ValueError) -> bool:
+        msg = str(exc).lower()
+        return "cuda support" in msg or "compiled with cuda" in msg
 
     # ── Session management ────────────────────────────────────────────────
 
