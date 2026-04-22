@@ -106,7 +106,7 @@ class LiveCaptioner:
         for pid, rec in list(active_recorders.items()):
             if pid in self._inflight:
                 continue
-            audio_path = getattr(rec, 'audio_path', None)
+            audio_path = getattr(rec, 'caption_audio_path', None) or getattr(rec, 'audio_path', None)
             if not audio_path:
                 # No active file yet; skip
                 continue

@@ -488,6 +488,7 @@ class ESP32SerialRecorder:
         self.sample_rate = sample_rate
         self.channels = channels
         self.audio_path: Optional[str] = None
+        self.caption_audio_path: Optional[str] = None
         self._start_time: Optional[float] = None
         self._recording = False
     
@@ -497,19 +498,20 @@ class ESP32SerialRecorder:
         Called by LiveCaptioner before each transcription attempt so the file
         always exists and contains the most recent audio. Returns True on success.
         """
-        if not self._recording or self.audio_path is None:
+        if not self._recording or self.caption_audio_path is None:
             return False
         if seconds is None:
             seconds = time.time() - self._start_time if self._start_time else None
-        return self.receiver.write_to_wav(self.audio_path, seconds=seconds)
+        return self.receiver.write_to_wav(self.caption_audio_path, seconds=seconds)
 
     def start(self, directory: str, filename_prefix: str = "meeting") -> str:
         """Start a recording session."""
-        from datetime import datetime
+        from datetime import datetime, timezone
         
         os.makedirs(directory, exist_ok=True)
-        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         self.audio_path = os.path.join(directory, f"{filename_prefix}_{ts}.wav")
+        self.caption_audio_path = os.path.join(directory, f".{filename_prefix}_{ts}.live.wav")
         self._start_time = time.time()
         self._recording = True
         
@@ -532,7 +534,14 @@ class ESP32SerialRecorder:
         success = self.receiver.write_to_wav(self.audio_path, seconds=duration)
         
         path = self.audio_path if success else None
+        if self.caption_audio_path is not None:
+            try:
+                if os.path.exists(self.caption_audio_path):
+                    os.remove(self.caption_audio_path)
+            except Exception:
+                pass
         self.audio_path = None
+        self.caption_audio_path = None
         self._start_time = None
         
         return path

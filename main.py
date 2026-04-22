@@ -903,6 +903,11 @@ def recognize_face():
         cap.release()
     except Exception:
         pass
+    for session_key in list(active_recorders.keys()):
+        try:
+            _stop_session(session_key)
+        except Exception as stop_err:
+            print(f"WARNING: Failed to finalize recording for session {session_key}: {stop_err}")
     cv2.destroyAllWindows()
     try:
         if audio_forwarder is not None:
