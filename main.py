@@ -235,10 +235,14 @@ def recognize_face():
         return "BOTH"
 
     def _effective_mode(mode_byte: int) -> int:
-        if mode_byte in (MODE_AUDIO, MODE_FACE):
-            return mode_byte
+        if forced_mode in (MODE_AUDIO, MODE_FACE, MODE_BOTH):
+            if forced_mode == MODE_BOTH and not _server_offload_active:
+                return last_single_mode[0]
+            return forced_mode
         if _server_offload_active:
             return MODE_BOTH
+        if mode_byte in (MODE_AUDIO, MODE_FACE):
+            return mode_byte
         return last_single_mode[0]
 
     _first_mode_received = [False]
@@ -248,12 +252,18 @@ def recognize_face():
             return
         _first_mode_received[0] = True
         current_mode[0] = mode_byte
+        effective_mode = _effective_mode(mode_byte)
         if mode_byte in (MODE_AUDIO, MODE_FACE):
             last_single_mode[0] = mode_byte
-            print(f"{source}: Mode changed to {_mode_label(mode_byte)}")
+            if effective_mode == MODE_BOTH:
+                print(
+                    f"{source}: Switch requested {_mode_label(mode_byte)}; "
+                    "server available so effective mode is BOTH"
+                )
+            else:
+                print(f"{source}: Mode changed to {_mode_label(mode_byte)}")
             return
 
-        effective_mode = _effective_mode(mode_byte)
         if effective_mode == MODE_BOTH:
             print(f"{source}: Mode changed to BOTH")
         else:

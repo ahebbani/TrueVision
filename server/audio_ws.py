@@ -192,6 +192,10 @@ class AudioTranscriptionHandler:
         if len(sess.buffer) < min_bytes:
             return None  # not enough audio yet
 
+        print(
+            f"[audio_ws] Live captioning session {session_key} "
+            f"from {len(sess.buffer)} buffered bytes"
+        )
         wav_path = self._buffer_to_wav(bytes(sess.buffer))
         try:
             text = self._transcribe_wav(wav_path)
@@ -204,7 +208,12 @@ class AudioTranscriptionHandler:
         sess.full_transcript = text
         # Return last 30 words as caption
         words = text.split()
-        return " ".join(words[-30:])
+        caption = " ".join(words[-30:])
+        print(
+            f"[audio_ws] Live caption updated for session {session_key}: "
+            f"{len(caption)} chars"
+        )
+        return caption
 
     def final_transcribe(self, session_key: int) -> str:
         """Run a final full transcription on the complete session buffer."""
@@ -214,6 +223,10 @@ class AudioTranscriptionHandler:
         min_bytes = int(0.5 * self.cfg.sample_rate * self.cfg.bytes_per_sample)
         if len(sess.buffer) < min_bytes:
             return ""
+        print(
+            f"[audio_ws] Final transcription for session {session_key} "
+            f"with {len(sess.buffer)} buffered bytes"
+        )
         wav_path = self._buffer_to_wav(bytes(sess.buffer))
         try:
             text = self._transcribe_wav(wav_path)
@@ -223,6 +236,10 @@ class AudioTranscriptionHandler:
             except OSError:
                 pass
         sess.full_transcript = text
+        print(
+            f"[audio_ws] Final transcription complete for session {session_key}: "
+            f"{len(text)} chars"
+        )
         return text
 
     def summarize(self, transcript: str, previous_summary: str = "",
@@ -236,6 +253,10 @@ class AudioTranscriptionHandler:
             from summarization.text import clamp_summary_one_sentence
 
             cfg = OllamaConfig()
+            print(
+                f"[audio_ws] Summarizing transcript for {person_name or 'unknown person'} "
+                f"({len(transcript)} chars, max {max_chars})"
+            )
             prompt = build_one_sentence_summary_prompt(
                 transcript=transcript,
                 previous_summary=previous_summary,
@@ -246,6 +267,10 @@ class AudioTranscriptionHandler:
             summary = clamp_summary_one_sentence(raw, max_chars=max_chars)
             if not summary:
                 summary = clamp_summary_one_sentence(transcript, max_chars=max_chars)
+            print(
+                f"[audio_ws] Summary complete for {person_name or 'unknown person'}: "
+                f"{len(summary)} chars"
+            )
             return summary
         except Exception as e:
             print(f"[audio_ws] Summarization failed: {e}")

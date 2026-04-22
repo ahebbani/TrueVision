@@ -151,6 +151,7 @@ async def ws_audio(ws: WebSocket):
     handler = get_handler(_cfg)
     # Default session key — overridden by session_start message
     current_session_key: Optional[int] = None
+    print("[ws/audio] Client connected")
 
     try:
         while True:
@@ -184,6 +185,7 @@ async def ws_audio(ws: WebSocket):
                     if msg_type == "session_start":
                         sk = int(ctrl.get("session_key", 0))
                         current_session_key = sk
+                        print(f"[ws/audio] session_start received for session {sk}")
                         handler.start_session(
                             sk,
                             person_id=ctrl.get("person_id"),
@@ -193,6 +195,10 @@ async def ws_audio(ws: WebSocket):
                     elif msg_type == "session_end":
                         sk = int(ctrl.get("session_key", current_session_key or 0))
                         meeting_id = ctrl.get("meeting_id")
+                        print(
+                            f"[ws/audio] session_end received for session {sk} "
+                            f"meeting={meeting_id}"
+                        )
                         # Run final transcription + summarization
                         loop = asyncio.get_event_loop()
                         transcript = await loop.run_in_executor(
@@ -219,6 +225,7 @@ async def ws_audio(ws: WebSocket):
                                     status="done",
                                 )
                                 conn.close()
+                                print(f"[ws/audio] Stored result for meeting {meeting_id} in server DB")
                             except Exception as e:
                                 print(f"[ws/audio] Failed to persist meeting result {meeting_id}: {e}")
                         await ws.send_text(json.dumps({
@@ -228,13 +235,17 @@ async def ws_audio(ws: WebSocket):
                             "transcript": transcript,
                             "summary": summary,
                         }))
+                        print(
+                            f"[ws/audio] Result sent for session {sk}: "
+                            f"{len(transcript)} transcript chars, {len(summary)} summary chars"
+                        )
                         handler.end_session(sk)
 
             elif msg["type"] == "websocket.disconnect":
                 break
 
     except WebSocketDisconnect:
-        pass
+        print("[ws/audio] Client disconnected")
     except Exception as e:
         print(f"[ws/audio] Connection error: {e}")
     finally:
