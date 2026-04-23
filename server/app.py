@@ -167,11 +167,15 @@ async def ws_audio(ws: WebSocket):
                     # Attempt live captioning
                     caption = handler.maybe_caption(sk)
                     if caption:
-                        await ws.send_text(json.dumps({
+                        payload = {
                             "type": "caption",
                             "session_key": sk,
                             "text": caption,
-                        }))
+                        }
+                        source_language = handler.caption_source_language(sk)
+                        if source_language:
+                            payload["source_language"] = source_language
+                        await ws.send_text(json.dumps(payload))
 
                 elif "text" in msg and msg["text"]:
                     # Text frame: JSON control message

@@ -98,6 +98,7 @@ class ServerAudioWsTests(unittest.TestCase):
         self.assertEqual(transcript, "good morning")
         self.assertEqual(handler.buffer_sizes, [12])
         self.assertEqual(handler.transcribe_calls, [("translate", "de")])
+        self.assertEqual(handler.caption_source_language(3), "de")
 
     def test_english_only_whisper_model_disables_translation(self):
         handler = _StubHandler(self._make_cfg(whisper_model="small.en"))
@@ -111,6 +112,7 @@ class ServerAudioWsTests(unittest.TestCase):
         self.assertEqual(caption, "hola mundo")
         self.assertEqual(handler.transcribe_calls, [("transcribe", None)])
         self.assertFalse(handler._sessions[4].translation_enabled)
+        self.assertIsNone(handler.caption_source_language(4))
 
 
 if __name__ == "__main__":

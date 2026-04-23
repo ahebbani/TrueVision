@@ -337,6 +337,12 @@ class AudioTranscriptionHandler:
         )
         return caption
 
+    def caption_source_language(self, session_key: int) -> Optional[str]:
+        sess = self._sessions.get(session_key)
+        if sess is None or not sess.translation_enabled:
+            return None
+        return sess.detected_language
+
     def final_transcribe(self, session_key: int) -> str:
         """Run a final full transcription on the complete session buffer."""
         sess = self._sessions.get(session_key)

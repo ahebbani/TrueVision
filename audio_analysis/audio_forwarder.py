@@ -22,6 +22,12 @@ class AudioForwarder:
     """Forward audio from an ``ESP32SerialAudioReceiver`` to the TrueVision
     server over WebSocket, and receive live captions back."""
 
+    LANGUAGE_LABELS = {
+        "de": "German",
+        "en": "English",
+        "es": "Spanish",
+    }
+
     # How often (seconds) to read from the serial receiver and forward
     FORWARD_INTERVAL = 0.032  # ~32 ms = one ESP32 audio packet
     RECONNECT_ATTEMPTS = 3
@@ -112,6 +118,20 @@ class AudioForwarder:
         with self._lock:
             return self._captions.get(session_key)
 
+    @classmethod
+    def format_caption(cls, text: str, source_language: Optional[str] = None) -> str:
+        caption_text = (text or "").strip()
+        if not caption_text:
+            return ""
+        if not source_language:
+            return caption_text
+
+        normalized = source_language.strip().lower()
+        label = cls.LANGUAGE_LABELS.get(normalized)
+        if not label:
+            label = normalized[:1].upper() + normalized[1:]
+        return f"({label}) {caption_text}"
+
     def get_result(self, session_key: int) -> Optional[dict]:
         """Pop the final result for a session (transcript + summary)."""
         with self._lock:
@@ -177,7 +197,10 @@ class AudioForwarder:
 
         if msg_type == "caption":
             with self._lock:
-                self._captions[sk] = data.get("text", "")
+                self._captions[sk] = self.format_caption(
+                    data.get("text", ""),
+                    data.get("source_language"),
+                )
 
         elif msg_type == "result":
             with self._lock:
