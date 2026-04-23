@@ -18,7 +18,6 @@ Server → Client (Pi):
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 import os
 import tempfile
@@ -44,6 +43,13 @@ except ImportError:
 
 # ── Per-session audio accumulator ─────────────────────────────────────────
 
+
+@dataclass
+class _TranscriptionResult:
+    text: str
+    language: Optional[str] = None
+    language_probability: Optional[float] = None
+
 @dataclass
 class _AudioSession:
     session_key: int
@@ -52,6 +58,9 @@ class _AudioSession:
     buffer: bytearray = field(default_factory=bytearray)
     last_caption_time: float = 0.0
     full_transcript: str = ""
+    detected_language: Optional[str] = None
+    detected_language_probability: Optional[float] = None
+    translation_enabled: bool = False
 
 
 class AudioTranscriptionHandler:
@@ -65,6 +74,25 @@ class AudioTranscriptionHandler:
         self._sessions: Dict[int, _AudioSession] = {}
         self._effective_device = cfg.whisper_device
         self._effective_compute_type = cfg.whisper_compute_type
+        self._translation_warning_logged = False
+        self._warn_if_translation_unavailable()
+
+    def _warn_if_translation_unavailable(self) -> None:
+        if self.cfg.translation_available() or self._translation_warning_logged:
+            return
+        if self.cfg.translation_target_language.strip().lower() != "en":
+            print(
+                "[audio_ws] Translation target language is not supported; "
+                "live captions will pass through original speech."
+            )
+            self._translation_warning_logged = True
+            return
+        if not self.cfg.is_multilingual_whisper_model():
+            print(
+                f"[audio_ws] Whisper model '{self.cfg.whisper_model}' is English-only; "
+                "Spanish/German live translation is disabled until a multilingual model is used."
+            )
+            self._translation_warning_logged = True
 
     # ── Lazy model init ───────────────────────────────────────────────────
 
@@ -172,12 +200,109 @@ class AudioTranscriptionHandler:
         sf.write(path, audio, self.cfg.sample_rate, subtype="PCM_16")
         return path
 
-    def _transcribe_wav(self, wav_path: str) -> str:
+    def _cleanup_wav(self, wav_path: str) -> None:
+        try:
+            os.unlink(wav_path)
+        except OSError:
+            pass
+
+    def _transcribe_wav(
+        self,
+        wav_path: str,
+        *,
+        task: str = "transcribe",
+        language: Optional[str] = None,
+    ) -> _TranscriptionResult:
         self._ensure_model()
         assert self._model is not None
-        segments, _info = self._model.transcribe(wav_path, beam_size=1)
+        kwargs = {
+            "beam_size": 1,
+            "condition_on_previous_text": False,
+            "without_timestamps": True,
+            "vad_filter": False,
+        }
+        if task != "transcribe":
+            kwargs["task"] = task
+        if language:
+            kwargs["language"] = language
+        segments, info = self._model.transcribe(wav_path, **kwargs)
         parts = [seg.text.strip() for seg in segments]
-        return " ".join(p for p in parts if p)
+        detected_language = getattr(info, "language", None)
+        detected_probability = getattr(info, "language_probability", None)
+        if isinstance(detected_language, str):
+            detected_language = detected_language.lower()
+        if detected_probability is not None:
+            detected_probability = float(detected_probability)
+        return _TranscriptionResult(
+            text=" ".join(p for p in parts if p),
+            language=detected_language,
+            language_probability=detected_probability,
+        )
+
+    def _min_caption_bytes(self) -> int:
+        return int(0.5 * self.cfg.sample_rate * self.cfg.bytes_per_sample * self.cfg.channels)
+
+    def _live_window_bytes(self) -> int:
+        return int(
+            self.cfg.caption_window_sec
+            * self.cfg.sample_rate
+            * self.cfg.bytes_per_sample
+            * self.cfg.channels
+        )
+
+    def _live_caption_buffer(self, sess: _AudioSession) -> bytes:
+        window_bytes = self._live_window_bytes()
+        if window_bytes <= 0 or len(sess.buffer) <= window_bytes:
+            return bytes(sess.buffer)
+        return bytes(sess.buffer[-window_bytes:])
+
+    def _should_cache_language(self, probability: Optional[float]) -> bool:
+        if probability is None:
+            return True
+        return probability >= self.cfg.translation_detection_min_probability
+
+    def _translation_enabled_for_language(self, language: Optional[str]) -> bool:
+        if not language or not self.cfg.translation_available():
+            return False
+        return language in self.cfg.translation_source_languages()
+
+    def _cache_language(self, sess: _AudioSession, result: _TranscriptionResult) -> bool:
+        language = (result.language or "").strip().lower() or None
+        if language is None or not self._should_cache_language(result.language_probability):
+            return False
+        changed = language != sess.detected_language
+        sess.detected_language = language
+        sess.detected_language_probability = result.language_probability
+        sess.translation_enabled = self._translation_enabled_for_language(language)
+        return changed
+
+    def _transcribe_session_wav(self, sess: _AudioSession, wav_path: str) -> _TranscriptionResult:
+        if sess.detected_language:
+            task = "translate" if sess.translation_enabled else "transcribe"
+            return self._transcribe_wav(
+                wav_path,
+                task=task,
+                language=sess.detected_language,
+            )
+
+        result = self._transcribe_wav(wav_path)
+        language_changed = self._cache_language(sess, result)
+
+        if language_changed and sess.translation_enabled and sess.detected_language:
+            return self._transcribe_wav(
+                wav_path,
+                task="translate",
+                language=sess.detected_language,
+            )
+
+        return result
+
+    def _transcribe_buffer(self, sess: _AudioSession, buf: bytes) -> _TranscriptionResult:
+        wav_path = self._buffer_to_wav(buf)
+        try:
+            return self._transcribe_session_wav(sess, wav_path)
+        finally:
+            self._cleanup_wav(wav_path)
 
     def maybe_caption(self, session_key: int) -> Optional[str]:
         """If enough time has elapsed, transcribe current buffer and return
@@ -188,27 +313,24 @@ class AudioTranscriptionHandler:
         now = time.time()
         if (now - sess.last_caption_time) < self.cfg.caption_interval_sec:
             return None
-        min_bytes = int(0.5 * self.cfg.sample_rate * self.cfg.bytes_per_sample)
+        min_bytes = self._min_caption_bytes()
         if len(sess.buffer) < min_bytes:
             return None  # not enough audio yet
 
+        live_buf = self._live_caption_buffer(sess)
+
         print(
             f"[audio_ws] Live captioning session {session_key} "
-            f"from {len(sess.buffer)} buffered bytes"
+            f"from {len(live_buf)} live-window bytes ({len(sess.buffer)} total buffered)"
         )
-        wav_path = self._buffer_to_wav(bytes(sess.buffer))
-        try:
-            text = self._transcribe_wav(wav_path)
-        finally:
-            try:
-                os.unlink(wav_path)
-            except OSError:
-                pass
+        result = self._transcribe_buffer(sess, live_buf)
+        text = result.text
+        self._cache_language(sess, result)
         sess.last_caption_time = now
         sess.full_transcript = text
-        # Return last 30 words as caption
+        # Return the tail of the latest translated or transcribed text.
         words = text.split()
-        caption = " ".join(words[-30:])
+        caption = " ".join(words[-self.cfg.caption_max_words:])
         print(
             f"[audio_ws] Live caption updated for session {session_key}: "
             f"{len(caption)} chars"
@@ -220,21 +342,16 @@ class AudioTranscriptionHandler:
         sess = self._sessions.get(session_key)
         if sess is None or len(sess.buffer) == 0:
             return ""
-        min_bytes = int(0.5 * self.cfg.sample_rate * self.cfg.bytes_per_sample)
+        min_bytes = self._min_caption_bytes()
         if len(sess.buffer) < min_bytes:
             return ""
         print(
             f"[audio_ws] Final transcription for session {session_key} "
             f"with {len(sess.buffer)} buffered bytes"
         )
-        wav_path = self._buffer_to_wav(bytes(sess.buffer))
-        try:
-            text = self._transcribe_wav(wav_path)
-        finally:
-            try:
-                os.unlink(wav_path)
-            except OSError:
-                pass
+        result = self._transcribe_buffer(sess, bytes(sess.buffer))
+        text = result.text
+        self._cache_language(sess, result)
         sess.full_transcript = text
         print(
             f"[audio_ws] Final transcription complete for session {session_key}: "
