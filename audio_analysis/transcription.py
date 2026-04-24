@@ -64,11 +64,18 @@ class Transcriber:
     def transcribe(self, audio_path: str) -> str:
         self._ensure_model()
         assert self._model is not None
-        segments, info = self._model.transcribe(
-            audio_path,
-            beam_size=1,
-            task="translate",
-        )
+
+        # First pass to detect the spoken language.
+        segments, info = self._model.transcribe(audio_path, beam_size=1)
+        detected_lang = getattr(info, "language", None)
+
+        if detected_lang != "en":
+            segments, info = self._model.transcribe(
+                audio_path,
+                beam_size=1,
+                task="translate",
+            )
+
         text_parts = []
         for seg in segments:
             text_parts.append(seg.text.strip())
