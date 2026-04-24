@@ -329,6 +329,7 @@ class ESP32SerialAudioReceiver:
                             print(f"ESP32 Serial Audio: on_mode_change error: {cb_err}")
 
                 elif pkt_type == PKT_MARKER:
+                    print("ESP32 MARKER PACKET RECEIVED")
                     if self.on_marker is not None:
                         try:
                             self.on_marker()

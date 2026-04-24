@@ -279,7 +279,8 @@ def recognize_face():
         _set_requested_mode(mode_byte, source="ESP32")
 
     def _on_marker() -> None:
-        _marker_queue.put(datetime.now().strftime("%H:%M:%S"))
+        print("ESP32 USER BUTTON PRESSED → exiting TrueVision")
+        os._exit(0)
 
     # Wire up callbacks on the shared receiver for ESP32 mode/marker events.
     _esp32_receiver = None
