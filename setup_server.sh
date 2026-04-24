@@ -57,7 +57,13 @@ else
     echo "Set WHISPER_DEVICE=cpu in your environment."
 fi
 
+export WHISPER_MODEL="${WHISPER_MODEL:-small}"
 export WHISPER_DEVICE="${WHISPER_DEVICE:-auto}"
+
+if [[ "$WHISPER_MODEL" == *.en ]]; then
+    echo "WARNING: WHISPER_MODEL=$WHISPER_MODEL is English-only."
+    echo "         Server-side German/Spanish translation requires a multilingual model such as small or medium."
+fi
 
 # ── Step 3: Python venv ──────────────────────────────────────────────────────
 
@@ -180,6 +186,9 @@ echo "║                                                         ║"
 echo "║  Environment variables:                                  ║"
 echo "║    WHISPER_MODEL     (default: small)                    ║"
 echo "║    WHISPER_DEVICE    (default: auto)                     ║"
+echo "║    CAPTION_WINDOW_SEC (default: 2.0)                     ║"
+echo "║    TRANSLATION_SOURCE_LANGUAGES (default: es,de)         ║"
+echo "║    TRANSLATION_DETECTION_MIN_PROBABILITY (default: 0.65) ║"
 echo "║    OLLAMA_MODEL      (default: llama3.1:8b)              ║"
 echo "║    TRUEVISION_SERVER_PORT (default: 8008)                ║"
 echo "╚══════════════════════════════════════════════════════════╝"

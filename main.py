@@ -302,25 +302,52 @@ def recognize_face():
         print(f"ESP32: Serial port {args.serial_port} not present; integration disabled")
 
     transcriber: Optional[object] = None
-    if Transcriber is not None:
+    captioner = None
+    _local_transcriber_init_failed = False
+    _local_captioner_init_failed = False
+
+    def _ensure_local_transcriber() -> Optional[object]:
+        nonlocal transcriber, _local_transcriber_init_failed
+        if transcriber is not None:
+            return transcriber
+        if _local_transcriber_init_failed or Transcriber is None:
+            return None
         try:
             transcriber = Transcriber(model_size=args.whisper_model)
         except Exception as e:
             print(f"WARNING: Transcriber initialization failed ({e}). Transcription disabled.")
+            _local_transcriber_init_failed = True
+            return None
+        return transcriber
 
-    captioner = None
-    if transcriber is not None:
-        from audio_analysis.live_caption import LiveCaptioner, CaptionConfig
+    def _ensure_local_captioner():
+        nonlocal captioner, _local_captioner_init_failed
+        if captioner is not None:
+            return captioner
+        if _local_captioner_init_failed:
+            return None
 
-        captioner = LiveCaptioner(
-            transcriber,
-            CaptionConfig(
-                interval_sec=args.caption_interval,
-                max_words=args.caption_max_words,
-                window_sec=args.caption_window_sec,
-                language=args.caption_language,
-            ),
-        )
+        local_transcriber = _ensure_local_transcriber()
+        if local_transcriber is None:
+            return None
+
+        try:
+            from audio_analysis.live_caption import LiveCaptioner, CaptionConfig
+
+            captioner = LiveCaptioner(
+                local_transcriber,
+                CaptionConfig(
+                    interval_sec=args.caption_interval,
+                    max_words=args.caption_max_words,
+                    window_sec=args.caption_window_sec,
+                    language=args.caption_language,
+                ),
+            )
+        except Exception as e:
+            print(f"WARNING: Live captioner initialization failed ({e}).")
+            _local_captioner_init_failed = True
+            return None
+        return captioner
 
     # ── Server connection for offloaded transcription ─────────────────────
     server_conn = None
@@ -535,12 +562,25 @@ def recognize_face():
                 audio_forwarder.clear(session_key)
             return
 
+        if _server_offload_active:
+            cursor.execute(
+                "UPDATE meetings SET ended_at = datetime('now') WHERE id = ?",
+                (meeting_id,),
+            )
+            conn.commit()
+            print(
+                "WARNING: Server audio offload was active at session end, but no server result path was available; "
+                "skipping local Whisper transcription on the Pi."
+            )
+            return
+
         # ── Local transcription path (original behavior) ────────────────
 
+        local_transcriber = _ensure_local_transcriber()
         transcript_text = None
-        if audio_path_final and transcriber is not None:
+        if audio_path_final and local_transcriber is not None:
             try:
-                transcript_text = transcriber.transcribe(audio_path_final)
+                transcript_text = local_transcriber.transcribe(audio_path_final)
             except Exception as e:
                 print(f"Transcription failed: {e}")
                 transcript_text = None
@@ -912,16 +952,21 @@ def recognize_face():
         caption = None
         caption_status = None
         if effective_mode != MODE_FACE:
-            if _server_offload_active and audio_forwarder is not None and audio_forwarder.is_connected:
-                # Get caption from server via WebSocket
-                for pid in list(active_recorders.keys()):
-                    caption = audio_forwarder.get_latest_caption(pid)
-                    if caption:
-                        break
-            elif captioner is not None and active_recorders:
-                captioner.update(active_recorders, active_meetings, cursor)
-                caption = captioner.get_caption_for_present(presence_state)
-                caption_status = captioner.get_status_for_present(presence_state)
+            if _server_offload_active:
+                if audio_forwarder is not None and audio_forwarder.is_connected:
+                    # Get caption from server via WebSocket
+                    for pid in list(active_recorders.keys()):
+                        caption = audio_forwarder.get_latest_caption(pid)
+                        if caption:
+                            break
+                elif args.show_caption_status:
+                    caption_status = "Waiting for server captions..."
+            else:
+                local_captioner = _ensure_local_captioner()
+                if local_captioner is not None and active_recorders:
+                    local_captioner.update(active_recorders, active_meetings, cursor)
+                    caption = local_captioner.get_caption_for_present(presence_state)
+                    caption_status = local_captioner.get_status_for_present(presence_state)
 
         overlay_text = caption
         if overlay_text is None and args.show_caption_status:
