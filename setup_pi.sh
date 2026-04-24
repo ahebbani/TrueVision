@@ -158,7 +158,7 @@ pip install faster-whisper
 pip install pyttsx3
 
 # Summarization service client (needed by Pi to contact the remote Ollama service)
-pip install requests
+pip install requests websocket-client
 
 success "pip packages installed."
 

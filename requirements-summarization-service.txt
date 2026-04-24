@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+requests
+numpy<2.0
+soundfile
+faster-whisper

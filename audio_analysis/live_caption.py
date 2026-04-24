@@ -12,6 +12,8 @@ from audio_analysis.transcription import LiveTranscriptionResult, language_label
 class CaptionConfig:
     interval_sec: float = 0.7
     max_words: int = 30
+    window_sec: float = 3.0
+    language_lock_min_probability: float = 0.65
 
 
 class LiveCaptioner:
@@ -21,16 +23,19 @@ class LiveCaptioner:
         self._last_update: Dict[int, float] = {}
         self._captions: Dict[int, str] = {}
         self._caption_languages: Dict[int, Optional[str]] = {}
+        self._locked_languages: Dict[int, Optional[str]] = {}
 
     def clear(self, pid: int) -> None:
         self._last_update.pop(pid, None)
         self._captions.pop(pid, None)
         self._caption_languages.pop(pid, None)
+        self._locked_languages.pop(pid, None)
 
     def clear_all(self) -> None:
         self._last_update.clear()
         self._captions.clear()
         self._caption_languages.clear()
+        self._locked_languages.clear()
 
     def update(self, active_recorders: Dict[int, object], active_meetings: Dict[int, int], cursor) -> None:
         now = time.time()
@@ -47,6 +52,8 @@ class LiveCaptioner:
             flush = getattr(rec, 'flush_to_wav', None)
             if flush is not None:
                 try:
+                    flushed = flush(seconds=self.cfg.window_sec)
+                except TypeError:
                     flushed = flush()
                 except Exception:
                     flushed = False
@@ -61,7 +68,10 @@ class LiveCaptioner:
             try:
                 live_transcribe = getattr(self.transcriber, 'transcribe_live', None)
                 if live_transcribe is not None:
-                    live_result = live_transcribe(audio_path)
+                    live_result = live_transcribe(
+                        audio_path,
+                        source_language_hint=self._locked_languages.get(pid),
+                    )
                 else:
                     live_result = LiveTranscriptionResult(text=self.transcriber.transcribe(audio_path))
                 text_live = live_result.text
@@ -70,6 +80,8 @@ class LiveCaptioner:
                 tail_txt = ' '.join(words[-self.cfg.max_words:])
                 self._captions[pid] = tail_txt
                 self._caption_languages[pid] = live_result.detected_language
+                if self._should_lock_language(live_result):
+                    self._locked_languages[pid] = live_result.detected_language
                 mid = active_meetings.get(pid)
                 if mid is not None and text_live:
                     cursor.execute(
@@ -109,3 +121,11 @@ class LiveCaptioner:
         if not label:
             return caption
         return f"({label}) {caption}"
+
+    def _should_lock_language(self, live_result: LiveTranscriptionResult) -> bool:
+        language = (live_result.detected_language or '').strip().lower()
+        if language not in {'de', 'es'}:
+            return False
+        if live_result.language_probability is None:
+            return True
+        return live_result.language_probability >= self.cfg.language_lock_min_probability

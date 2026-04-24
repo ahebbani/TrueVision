@@ -50,6 +50,7 @@ class LiveTranscriptionResult:
     text: str
     detected_language: Optional[str] = None
     translated: bool = False
+    language_probability: Optional[float] = None
 
 
 def language_label(language_code: Optional[str]) -> Optional[str]:
@@ -162,7 +163,11 @@ class Transcriber:
             text_parts.append(seg.text.strip())
         return " ".join([t for t in text_parts if t])
 
-    def transcribe_live(self, audio_path: str) -> LiveTranscriptionResult:
+    def transcribe_live(
+        self,
+        audio_path: str,
+        source_language_hint: Optional[str] = None,
+    ) -> LiveTranscriptionResult:
         self._ensure_model()
         assert self._model is not None
 
@@ -172,13 +177,37 @@ class Transcriber:
             "without_timestamps": True,
             "vad_filter": False,
         }
+        hinted_language = (source_language_hint or "").strip().lower() or None
+        if hinted_language and hinted_language not in SUPPORTED_TRANSLATION_LANGUAGES:
+            hinted_language = None
+
+        if hinted_language and not self.model_size.strip().lower().endswith(".en"):
+            translated_segments, _translated_info = self._model.transcribe(
+                audio_path,
+                task="translate",
+                language=hinted_language,
+                **kwargs,
+            )
+            translated_text = " ".join(
+                seg.text.strip() for seg in translated_segments if seg.text.strip()
+            )
+            if translated_text:
+                return LiveTranscriptionResult(
+                    text=translated_text,
+                    detected_language=hinted_language,
+                    translated=True,
+                )
+
         segments, info = self._model.transcribe(audio_path, **kwargs)
         text = " ".join(seg.text.strip() for seg in segments if seg.text.strip())
         detected_language = getattr(info, "language", None)
+        language_probability = getattr(info, "language_probability", None)
         if isinstance(detected_language, str):
             detected_language = detected_language.lower()
         else:
             detected_language = None
+        if language_probability is not None:
+            language_probability = float(language_probability)
 
         if (
             detected_language in SUPPORTED_TRANSLATION_LANGUAGES
@@ -198,12 +227,14 @@ class Transcriber:
                     text=translated_text,
                     detected_language=detected_language,
                     translated=True,
+                    language_probability=language_probability,
                 )
 
         return LiveTranscriptionResult(
             text=text,
             detected_language=detected_language,
             translated=False,
+            language_probability=language_probability,
         )
 
 

@@ -93,6 +93,18 @@ def parse_args():
     p.add_argument('--caption-interval', type=float, default=0.7, help='Seconds between caption updates')
     p.add_argument('--caption-max-words', type=int, default=30)
     p.add_argument('--caption-max-lines', type=int, default=2)
+    p.add_argument('--caption-window-sec', type=float, default=3.0,
+                   help='Rolling audio window used for live captioning and language detection')
+    p.add_argument('--server-url', default=os.environ.get('TRUEVISION_SERVER_URL', os.environ.get('SUMMARIZER_URL', '')),
+                   help='TrueVision server URL for server-backed captioning in BOTH mode')
+    p.add_argument('--no-server', action='store_true',
+                   help='Disable server-backed captioning even if a server URL is configured')
+    p.add_argument('--server-check-interval', type=float, default=5.0,
+                   help='Seconds between server availability checks')
+    p.add_argument('--server-connect-retries', type=int, default=3,
+                   help='Startup retries before treating the server as unavailable')
+    p.add_argument('--server-retry-delay', type=float, default=2.0,
+                   help='Seconds between startup server availability retries')
     # Caption speech (TTS)
     p.add_argument(
         '--speak-captions',
@@ -182,6 +194,7 @@ def recognize_face():
     transcription_enabled = args.audio
     active_recorders = {}
     active_meetings = {}
+    active_server_session = [None]
     Recorder = None
     create_recorder = None
     Transcriber = None
@@ -272,22 +285,73 @@ def recognize_face():
         except Exception as _recv_err:
             print(f"WARNING: Could not initialise ESP32 receiver for callbacks: {_recv_err}")
 
-    transcriber: Optional[object] = None
-    if transcription_enabled and Transcriber is not None:
+    server_conn = None
+    audio_forwarder = None
+    _server_offload_active = False
+    _last_server_check = 0.0
+
+    if not getattr(args, 'no_server', False) and getattr(args, 'server_url', '').strip():
         try:
-            transcriber = Transcriber(model_size=args.whisper_model)
-        except Exception as e:
-            print(f"WARNING: Transcriber initialization failed ({e}). Transcription disabled.")
-            transcription_enabled = False
+            from audio_analysis.server_connection import ServerConnection
 
+            server_conn = ServerConnection(args.server_url)
+            _server_offload_active = server_conn.wait_until_available(
+                retries=int(getattr(args, 'server_connect_retries', 3)),
+                delay_sec=float(getattr(args, 'server_retry_delay', 2.0)),
+            )
+            if _server_offload_active:
+                print(f"Server offload available at {server_conn.url}")
+            else:
+                print("WARNING: Server offload unavailable; BOTH mode will fall back to FACE.")
+        except Exception as _server_err:
+            print(f"WARNING: Could not initialise server connection ({_server_err}).")
+
+    def _ensure_audio_forwarder():
+        nonlocal audio_forwarder
+        if server_conn is None or _esp32_receiver is None:
+            return None
+        if audio_forwarder is not None:
+            return audio_forwarder
+        try:
+            from audio_analysis.audio_forwarder import AudioForwarder
+
+            audio_forwarder = AudioForwarder(server_conn.ws_url, _esp32_receiver)
+            audio_forwarder.start()
+            return audio_forwarder
+        except Exception as _fwd_err:
+            print(f"WARNING: Could not start audio forwarder ({_fwd_err}).")
+            audio_forwarder = None
+            return None
+
+    if _server_offload_active and _esp32_receiver is not None:
+        _ensure_audio_forwarder()
+
+    transcriber: Optional[object] = None
     captioner = None
-    if transcription_enabled and transcriber is not None:
-        from audio_analysis.live_caption import LiveCaptioner, CaptionConfig
 
-        captioner = LiveCaptioner(
-            transcriber,
-            CaptionConfig(interval_sec=args.caption_interval, max_words=args.caption_max_words),
-        )
+    def _ensure_local_captioner() -> bool:
+        nonlocal transcriber, captioner, transcription_enabled
+        if not transcription_enabled or Transcriber is None:
+            return False
+        if transcriber is None:
+            try:
+                transcriber = Transcriber(model_size=args.whisper_model)
+            except Exception as e:
+                print(f"WARNING: Transcriber initialization failed ({e}). Transcription disabled.")
+                transcription_enabled = False
+                return False
+        if captioner is None:
+            from audio_analysis.live_caption import LiveCaptioner, CaptionConfig
+
+            captioner = LiveCaptioner(
+                transcriber,
+                CaptionConfig(
+                    interval_sec=args.caption_interval,
+                    max_words=args.caption_max_words,
+                    window_sec=args.caption_window_sec,
+                ),
+            )
+        return True
 
     # Optional caption speaker (TTS)
     speaker = None
@@ -340,6 +404,32 @@ def recognize_face():
         nonlocal transcription_enabled
         if not transcription_enabled or session_key in active_recorders:
             return
+
+        def _use_server_offload(mode_byte: int) -> bool:
+            return mode_byte == MODE_BOTH and _server_offload_active and audio_forwarder is not None and audio_forwarder.is_connected
+
+        current_effective_mode = _effective_mode(current_mode[0])
+
+        if _use_server_offload(current_effective_mode):
+            if active_server_session[0] is not None and active_server_session[0] != session_key:
+                return
+            meeting_id_val = None
+            if person_id is not None:
+                cursor.execute(
+                    "INSERT INTO meetings (person_id, started_at, audio_path) VALUES (?, datetime('now'), ?)",
+                    (person_id, f"server://{label_prefix}"),
+                )
+                meeting_id_val = cursor.lastrowid
+                active_meetings[session_key] = meeting_id_val
+                conn.commit()
+            active_server_session[0] = session_key
+            fwd = _ensure_audio_forwarder()
+            if fwd is not None and fwd.is_connected:
+                fwd.send_session_start(session_key, person_id=person_id, meeting_id=meeting_id_val)
+            return
+
+        if not _ensure_local_captioner():
+            return
         if create_recorder:
             rec = create_recorder(
                 audio_source=args.audio_source,
@@ -371,6 +461,72 @@ def recognize_face():
     def _stop_session(session_key: int) -> None:
         rec = active_recorders.pop(session_key, None)
         meeting_id = active_meetings.pop(session_key, None)
+        if active_server_session[0] == session_key:
+            active_server_session[0] = None
+            prev_summary = ""
+            person_name = None
+            try:
+                if meeting_id is not None:
+                    cursor.execute(
+                        """
+                        SELECT COALESCE(summary,'') FROM meetings
+                        WHERE person_id = ? AND ended_at IS NOT NULL AND id < ? AND COALESCE(summary,'') != ''
+                        ORDER BY id DESC LIMIT 1
+                        """,
+                        (int(session_key), int(meeting_id)),
+                    )
+                    rprev = cursor.fetchone()
+                    prev_summary = (rprev[0] if rprev else "") or ""
+                cursor.execute("SELECT COALESCE(name,'') FROM faces WHERE id = ?", (int(session_key),))
+                rname = cursor.fetchone()
+                person_name = (rname[0] if rname else "") or None
+            except Exception:
+                pass
+            if audio_forwarder is not None and audio_forwarder.is_connected:
+                audio_forwarder.send_session_end(
+                    session_key,
+                    previous_summary=prev_summary,
+                    person_name=person_name,
+                    max_chars=int(getattr(args, 'summary_max_chars', 140)),
+                )
+            if meeting_id is not None:
+                cursor.execute(
+                    "UPDATE meetings SET ended_at = datetime('now') WHERE id = ?",
+                    (meeting_id,),
+                )
+                conn.commit()
+
+                import threading as _threading
+                import time as _time
+
+                def _poll_server_result(mid: int, sk: int, db_path: str):
+                    try:
+                        from data_access.db import open_db as _open_db
+
+                        for _ in range(60):
+                            result = audio_forwarder.get_result(sk) if audio_forwarder is not None else None
+                            if result is not None:
+                                c2 = _open_db(db_path)
+                                c2.execute(
+                                    "UPDATE meetings SET transcript = ?, summary = ? WHERE id = ?",
+                                    (result.get('transcript', ''), result.get('summary', ''), mid),
+                                )
+                                c2.commit()
+                                c2.close()
+                                return
+                            _time.sleep(0.5)
+                    except Exception as _e:
+                        print(f"Server result poll failed for meeting {mid}: {_e}")
+
+                _threading.Thread(
+                    target=_poll_server_result,
+                    args=(meeting_id, session_key, DB_PATH_DEFAULT),
+                    daemon=True,
+                ).start()
+            if audio_forwarder is not None:
+                audio_forwarder.clear(session_key)
+            return
+
         if rec is None:
             if captioner is not None:
                 captioner.clear(session_key)
@@ -546,6 +702,8 @@ def recognize_face():
         if mode_byte == MODE_AUDIO:
             for session_key in list(active_recorders.keys()):
                 _stop_session(session_key)
+            if active_server_session[0] is not None:
+                _stop_session(active_server_session[0])
             _clear_face_presence()
             if transcription_enabled:
                 _start_session(AUDIO_SESSION_KEY, person_id=None, label_prefix="audio_only")
@@ -554,6 +712,8 @@ def recognize_face():
         elif mode_byte == MODE_FACE:
             for session_key in list(active_recorders.keys()):
                 _stop_session(session_key)
+            if active_server_session[0] is not None:
+                _stop_session(active_server_session[0])
             presence_state.clear()
             last_detected_ts.clear()
             if captioner is not None:
@@ -566,12 +726,31 @@ def recognize_face():
             if captioner is not None:
                 captioner.clear(AUDIO_SESSION_KEY)
 
+    def _effective_mode(mode_byte: int) -> int:
+        if mode_byte == MODE_BOTH and not (_server_offload_active and audio_forwarder is not None and audio_forwarder.is_connected):
+            return MODE_FACE
+        return mode_byte
+
     applied_mode = None
 
     while True:
-        if applied_mode != current_mode[0]:
-            _apply_mode_transition(current_mode[0])
-            applied_mode = current_mode[0]
+        now_check = time.time()
+        if server_conn is not None and (now_check - _last_server_check) > float(getattr(args, 'server_check_interval', 5.0)):
+            _last_server_check = now_check
+            was_active = _server_offload_active
+            _server_offload_active = server_conn.is_available
+            if _server_offload_active and _esp32_receiver is not None:
+                _ensure_audio_forwarder()
+            if not _server_offload_active and audio_forwarder is not None:
+                audio_forwarder.stop()
+                audio_forwarder = None
+            if _server_offload_active != was_active:
+                applied_mode = None
+
+        effective_mode = _effective_mode(current_mode[0])
+        if applied_mode != effective_mode:
+            _apply_mode_transition(effective_mode)
+            applied_mode = effective_mode
 
         ret, frame = cap.read()
         if not ret:
@@ -604,7 +783,7 @@ def recognize_face():
         # --no-mode-gate remains available as a Pi-side override that forces BOTH
         # behavior regardless of firmware mode packets.
         _mode_gate_active = (forced_mode is not None) or ((_esp32_receiver is not None) and not getattr(args, 'no_mode_gate', False))
-        _skip_face = _mode_gate_active and (current_mode[0] == MODE_AUDIO)
+        _skip_face = _mode_gate_active and (effective_mode == MODE_AUDIO)
         faces_info = [] if _skip_face else recog.detect_and_recognize(conn, frame)
         if not hasattr(recognize_face, "_prev_summaries"):
             recognize_face._prev_summaries = {}
@@ -668,8 +847,8 @@ def recognize_face():
                         transcription_enabled,
                         prev_summary=prev_summary,
                     )
-                    mode_allows_recording = (not _mode_gate_active) or (current_mode[0] != MODE_FACE)
-                    if transcription_enabled and recognized_id not in active_recorders and mode_allows_recording:
+                    mode_allows_recording = (not _mode_gate_active) or (effective_mode != MODE_FACE)
+                    if transcription_enabled and recognized_id not in active_recorders and active_server_session[0] != recognized_id and mode_allows_recording:
                         _start_session(
                             int(recognized_id),
                             person_id=int(recognized_id),
@@ -677,6 +856,13 @@ def recognize_face():
                         )
                 else:
                     presence_state[recognized_id] = 'present'
+                    mode_allows_recording = (not _mode_gate_active) or (effective_mode != MODE_FACE)
+                    if transcription_enabled and recognized_id not in active_recorders and active_server_session[0] != recognized_id and mode_allows_recording:
+                        _start_session(
+                            int(recognized_id),
+                            person_id=int(recognized_id),
+                            label_prefix=f"person{recognized_id}",
+                        )
 
                 # Adaptive template add
                 if recognized_id is not None and info.embedding is not None:
@@ -699,11 +885,47 @@ def recognize_face():
                     if len(prev_line) > max_chars:
                         prev_line = prev_line[: max_chars - 1].rstrip() + "…"
                     cv2.putText(display_frame, f"Prev: {prev_line}", (x, y+30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-                if transcription_enabled and recognized_id in active_recorders:
+                if transcription_enabled and (recognized_id in active_recorders or active_server_session[0] == recognized_id):
                     cv2.putText(display_frame, "REC", (x, y+45), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
         # Live transcription overlay (closed captioning)
-        if transcription_enabled and captioner is not None and active_recorders:
+        if effective_mode == MODE_BOTH and _server_offload_active and audio_forwarder is not None and audio_forwarder.is_connected and active_server_session[0] is not None:
+            display_caption = audio_forwarder.get_latest_caption(active_server_session[0])
+            if display_caption:
+                if speaker is not None:
+                    try:
+                        speaker.submit(display_caption)
+                    except Exception:
+                        pass
+                img_h, img_w = display_frame.shape[0], display_frame.shape[1]
+                margin = 10
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 0.6
+                thickness = 2
+                words = display_caption.split()
+                lines = []
+                current = ""
+                for w in words:
+                    test = (current + (" " if current else "") + w)
+                    ((tw, _th), _) = cv2.getTextSize(test, font, font_scale, thickness)
+                    if tw + margin*2 <= img_w:
+                        current = test
+                    else:
+                        if current:
+                            lines.append(current)
+                        current = w
+                if current:
+                    lines.append(current)
+                lines = lines[-int(args.caption_max_lines):]
+                line_height = int(cv2.getTextSize("Ag", font, font_scale, thickness)[0][1] * 1.6)
+                box_height = line_height * len(lines) + margin*2
+                y0 = max(0, img_h - box_height)
+                cv2.rectangle(display_frame, (0, y0), (img_w, img_h), (0, 0, 0), -1)
+                y = y0 + margin + int(line_height * 0.8)
+                for ln in lines:
+                    cv2.putText(display_frame, ln, (margin, y), font, font_scale, (255, 255, 255), thickness)
+                    y += line_height
+        elif transcription_enabled and _ensure_local_captioner() and captioner is not None and active_recorders:
             captioner.update(active_recorders, active_meetings, cursor)
             caption = captioner.get_caption_for_present(presence_state)
             display_caption = captioner.get_display_caption_for_present(presence_state)
@@ -788,6 +1010,11 @@ def recognize_face():
     except Exception:
         pass
     cv2.destroyAllWindows()
+    try:
+        if audio_forwarder is not None:
+            audio_forwarder.stop()
+    except Exception:
+        pass
     try:
         if speaker is not None:
             speaker.close()
