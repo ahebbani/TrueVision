@@ -268,12 +268,20 @@ class AudioTranscriptionHandler:
 
     def _cache_language(self, sess: _AudioSession, result: _TranscriptionResult) -> bool:
         language = (result.language or "").strip().lower() or None
-        if language is None or not self._should_cache_language(result.language_probability):
+        if language is None:
+            return False
+        # Only lock the session to a translation language once we have a
+        # reasonably confident supported-language detection. Otherwise keep
+        # detecting on future live windows instead of getting stuck on an
+        # early English guess from a short utterance.
+        if not self._translation_enabled_for_language(language):
+            return False
+        if not self._should_cache_language(result.language_probability):
             return False
         changed = language != sess.detected_language
         sess.detected_language = language
         sess.detected_language_probability = result.language_probability
-        sess.translation_enabled = self._translation_enabled_for_language(language)
+        sess.translation_enabled = True
         return changed
 
     def _transcribe_session_wav(self, sess: _AudioSession, wav_path: str) -> _TranscriptionResult:

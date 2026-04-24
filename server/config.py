@@ -27,7 +27,7 @@ class ServerConfig:
     )
     translation_target_language: str = os.environ.get("TRANSLATION_TARGET_LANGUAGE", "en")
     translation_detection_min_probability: float = float(
-        os.environ.get("TRANSLATION_DETECTION_MIN_PROBABILITY", "0.0")
+        os.environ.get("TRANSLATION_DETECTION_MIN_PROBABILITY", "0.65")
     )
 
     # Audio
