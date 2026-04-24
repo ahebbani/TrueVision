@@ -169,40 +169,41 @@ def telegram_llm(req: TelegramRequest):
         raise HTTPException(status_code=400, detail="command is required")
 
     prompt = f"""
-You convert a voice transcript into a Telegram message.
+Extract the Telegram message from this voice command.
 
-Only send if the user clearly wants to send/tell/text/message/announce something.
-Return ONLY valid JSON.
+Return ONLY the final message text.
+No JSON. No explanation. No quotes.
 
-Schema:
-{{
-  "should_send": true or false,
-  "message": "message to send"
-}}
-
-Transcript:
+Voice command:
 {transcript}
 """
 
     try:
-        raw, _meta = generate_one_shot(prompt, cfg=OllamaConfig())
-        data = json.loads(raw)
+        cfg = OllamaConfig()
+        cfg.model = "llama3.1:8b"
+
+        message, _meta = generate_one_shot(prompt, cfg=cfg)
+        message = (message or "").strip().strip('"').strip()
+
+        print("LLM RAW MESSAGE:", message)
+
+        if not message:
+            raise RuntimeError("LLM returned empty message")
+
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"ollama failed: {e}")
-
-    if not data.get("should_send"):
-        return {"ok": False, "result": "No send intent detected"}
-
-    message = (data.get("message") or "").strip()
-    if not message:
-        return {"ok": False, "result": "No message extracted"}
 
     try:
         result = handle_telegram_voice_command("send " + message)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"telegram failed: {e}")
 
-    return {"ok": True, "result": result, "message": message}
+    return {
+        "ok": True,
+        "message": message,
+        "result": result,
+        "model": cfg.model,
+    }
 
 
 # ── WebSocket audio streaming ────────────────────────────────────────────
