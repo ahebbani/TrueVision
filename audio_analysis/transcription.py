@@ -64,7 +64,11 @@ class Transcriber:
     def transcribe(self, audio_path: str) -> str:
         self._ensure_model()
         assert self._model is not None
-        segments, info = self._model.transcribe(audio_path, beam_size=1)
+        segments, info = self._model.transcribe(
+            audio_path,
+            beam_size=1,
+            task="translate",
+        )
         text_parts = []
         for seg in segments:
             text_parts.append(seg.text.strip())
@@ -79,9 +83,8 @@ class Transcriber:
             "condition_on_previous_text": False,
             "without_timestamps": True,
             "vad_filter": False,
+            "task": "translate",
         }
-        if language and language != "auto":
-            kwargs["language"] = language
 
         segments, info = self._model.transcribe(audio_path, **kwargs)
         text_parts = []
