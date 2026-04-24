@@ -447,6 +447,52 @@ def recognize_face():
                 fwd.send_session_start(session_key, person_id=person_id,
                                        meeting_id=meeting_id_val)
 
+    TELEGRAM_DGX_URL = "http://10.186.71.82:8008"
+
+    def _is_telegram_command(text: str) -> bool:
+        return "telegram" in (text or "").lower()
+
+    def _clean_telegram_command(text: str) -> str:
+        text = text or ""
+        lower = text.lower()
+        idx = lower.find("telegram")
+        if idx == -1:
+            return text.strip()
+        return text[idx + len("telegram"):].strip(" ,.")
+
+    def _maybe_send_telegram_command(transcript_text: str) -> bool:
+        transcript_text = (transcript_text or "").strip()
+        print("FULL TRANSCRIPT:", transcript_text)
+
+        if not _is_telegram_command(transcript_text):
+            print("No Telegram command detected.")
+            return False
+
+        command = _clean_telegram_command(transcript_text)
+        print("CLEANED TELEGRAM COMMAND:", command)
+
+        if not command:
+            print("Telegram command detected, but command was empty.")
+            return True
+
+        payload = json.dumps({"command": command}).encode("utf-8")
+
+        req = urllib.request.Request(
+            f"{TELEGRAM_DGX_URL}/telegram",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                response_text = resp.read().decode("utf-8", errors="replace")
+                print("Telegram response:", response_text)
+        except Exception as e:
+            print(f"Telegram send failed: {e}")
+
+        return True
+
     def _stop_session(session_key: int) -> None:
         rec = active_recorders.pop(session_key, None)
         meeting_id = active_meetings.pop(session_key, None)
@@ -460,8 +506,21 @@ def recognize_face():
             captioner.clear(session_key)
 
         if meeting_id is None:
+            transcript_text = ""
+
+            if audio_path_final and transcriber is not None:
+                try:
+                    transcript_text = transcriber.transcribe(audio_path_final)
+                    print(f"Audio-only transcript: {transcript_text}")
+                except Exception as e:
+                    print(f"Audio-only transcription failed: {e}")
+
+            if transcript_text:
+                _maybe_send_telegram_command(transcript_text)
+
             if audio_path_final:
                 print(f"Audio-only session saved to {audio_path_final}")
+
             return
 
         # ── Server-offloaded transcription path ──────────────────────────
@@ -549,6 +608,9 @@ def recognize_face():
             cursor.execute("SELECT COALESCE(transcript,'') FROM meetings WHERE id = ?", (meeting_id,))
             (existing_transcript,) = cursor.fetchone() or ('',)
             transcript_text = existing_transcript or ''
+
+        if transcript_text:
+            _maybe_send_telegram_command(transcript_text)
 
         cursor.execute(
             "UPDATE meetings SET ended_at = datetime('now'), transcript = ? WHERE id = ?",
