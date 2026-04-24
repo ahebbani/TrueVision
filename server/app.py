@@ -27,6 +27,7 @@ from server.config import ServerConfig
 from server.audio_ws import get_handler
 from server.discovery import DiscoveryAdvertiser
 from server import db as server_db
+from server.telegram_sender import handle_telegram_voice_command
 
 # Re-use existing summarization helpers
 from summarization.ollama_client import OllamaConfig, generate_one_shot
@@ -46,6 +47,10 @@ class SummarizeResponse(BaseModel):
     summary: str
     model: str
     took_ms: int
+
+
+class TelegramRequest(BaseModel):
+    command: str
 
 
 class JobStatusResponse(BaseModel):
@@ -141,6 +146,20 @@ def summarize(req: SummarizeRequest):
         model=str(meta.get("model") or cfg.model),
         took_ms=int(meta.get("took_ms") or 0),
     )
+
+
+@app.post("/telegram")
+def telegram(req: TelegramRequest):
+    command = (req.command or "").strip()
+    if not command:
+        raise HTTPException(status_code=400, detail="command is required")
+
+    try:
+        result = handle_telegram_voice_command(command)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"telegram failed: {e}")
+
+    return {"ok": True, "result": result}
 
 
 # ── WebSocket audio streaming ────────────────────────────────────────────
