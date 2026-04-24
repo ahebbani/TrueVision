@@ -19,6 +19,7 @@ import os
 import shutil
 from contextlib import asynccontextmanager
 from typing import Optional
+from server.telegram_sender import handle_telegram_voice_command
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
@@ -142,6 +143,17 @@ def summarize(req: SummarizeRequest):
         took_ms=int(meta.get("took_ms") or 0),
     )
 
+def is_telegram_voice_command(text: str) -> bool:
+    t = text.lower().strip()
+    return t.startswith(("telegram", "send telegram"))
+
+
+def clean_telegram_voice_command(text: str) -> str:
+    t = text.strip()
+    for prefix in ["send telegram", "telegram"]:
+        if t.lower().startswith(prefix):
+            return t[len(prefix):].strip(" ,.")
+    return t
 
 # ── WebSocket audio streaming ────────────────────────────────────────────
 
@@ -205,7 +217,16 @@ async def ws_audio(ws: WebSocket):
                             None, handler.final_transcribe, sk,
                         )
                         summary = ""
-                        if transcript.strip():
+                        if transcript.strip() and is_telegram_voice_command(transcript):
+                            cmd = clean_telegram_voice_command(transcript)
+
+                            summary = await loop.run_in_executor(
+                                None,
+                                handle_telegram_voice_command,
+                                cmd,
+                            )
+
+                        elif transcript.strip():
                             summary = await loop.run_in_executor(
                                 None,
                                 handler.summarize,
