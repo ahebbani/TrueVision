@@ -449,36 +449,42 @@ def recognize_face():
 
     TELEGRAM_DGX_URL = "http://10.186.71.82:8008"
 
-    def _is_telegram_command(text: str) -> bool:
-        return "telegram" in (text or "").lower()
+    def _is_assistant_command(text: str) -> bool:
+        lower = (text or "").lower()
+        return "assistant" in lower or "truevision" in lower
 
-    def _clean_telegram_command(text: str) -> str:
+    def _clean_assistant_command(text: str) -> str:
         text = text or ""
         lower = text.lower()
-        idx = lower.find("telegram")
-        if idx == -1:
+        idx_assistant = lower.find("assistant")
+        idx_truevision = lower.find("truevision")
+        if idx_assistant == -1 and idx_truevision == -1:
             return text.strip()
-        return text[idx + len("telegram"):].strip(" ,.")
+
+        valid_idxs = [i for i in (idx_assistant, idx_truevision) if i != -1]
+        idx = min(valid_idxs)
+        keyword = "assistant" if idx == idx_assistant else "truevision"
+        return text[idx + len(keyword):].strip(" ,.")
 
     def _maybe_send_telegram_command(transcript_text: str) -> bool:
         transcript_text = (transcript_text or "").strip()
         print("FULL TRANSCRIPT:", transcript_text)
 
-        if not _is_telegram_command(transcript_text):
-            print("No Telegram command detected.")
+        if not _is_assistant_command(transcript_text):
+            print("No Assistant wake word detected.")
             return False
 
-        command = _clean_telegram_command(transcript_text)
-        print("CLEANED TELEGRAM COMMAND:", command)
+        command = _clean_assistant_command(transcript_text)
+        print("CLEANED ASSISTANT COMMAND:", command)
 
         if not command:
-            print("Telegram command detected, but command was empty.")
+            print("Assistant command detected, but command was empty.")
             return True
 
         payload = json.dumps({"command": command}).encode("utf-8")
 
         req = urllib.request.Request(
-            f"{TELEGRAM_DGX_URL}/telegram",
+            f"{TELEGRAM_DGX_URL}/telegram_llm",
             data=payload,
             headers={"Content-Type": "application/json"},
             method="POST",
