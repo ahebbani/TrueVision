@@ -1,6 +1,7 @@
 import os
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
@@ -35,6 +36,29 @@ except Exception:  # pragma: no cover
 
 _shared_serial_receivers = {}
 _shared_serial_receivers_lock = threading.Lock()
+
+SUPPORTED_TRANSLATION_LANGUAGES = {"de", "es"}
+LANGUAGE_LABELS = {
+    "de": "German",
+    "en": "English",
+    "es": "Spanish",
+}
+
+
+@dataclass
+class LiveTranscriptionResult:
+    text: str
+    detected_language: Optional[str] = None
+    translated: bool = False
+
+
+def language_label(language_code: Optional[str]) -> Optional[str]:
+    if not language_code:
+        return None
+    normalized = language_code.strip().lower()
+    if not normalized:
+        return None
+    return LANGUAGE_LABELS.get(normalized, normalized[:1].upper() + normalized[1:])
 
 
 class Recorder:
@@ -137,6 +161,50 @@ class Transcriber:
         for seg in segments:
             text_parts.append(seg.text.strip())
         return " ".join([t for t in text_parts if t])
+
+    def transcribe_live(self, audio_path: str) -> LiveTranscriptionResult:
+        self._ensure_model()
+        assert self._model is not None
+
+        kwargs = {
+            "beam_size": 1,
+            "condition_on_previous_text": False,
+            "without_timestamps": True,
+            "vad_filter": False,
+        }
+        segments, info = self._model.transcribe(audio_path, **kwargs)
+        text = " ".join(seg.text.strip() for seg in segments if seg.text.strip())
+        detected_language = getattr(info, "language", None)
+        if isinstance(detected_language, str):
+            detected_language = detected_language.lower()
+        else:
+            detected_language = None
+
+        if (
+            detected_language in SUPPORTED_TRANSLATION_LANGUAGES
+            and not self.model_size.strip().lower().endswith(".en")
+        ):
+            translated_segments, _translated_info = self._model.transcribe(
+                audio_path,
+                task="translate",
+                language=detected_language,
+                **kwargs,
+            )
+            translated_text = " ".join(
+                seg.text.strip() for seg in translated_segments if seg.text.strip()
+            )
+            if translated_text:
+                return LiveTranscriptionResult(
+                    text=translated_text,
+                    detected_language=detected_language,
+                    translated=True,
+                )
+
+        return LiveTranscriptionResult(
+            text=text,
+            detected_language=detected_language,
+            translated=False,
+        )
 
 
 def summarize_text(text: str, max_sentences: int = 5) -> str:

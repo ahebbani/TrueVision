@@ -706,8 +706,9 @@ def recognize_face():
         if transcription_enabled and captioner is not None and active_recorders:
             captioner.update(active_recorders, active_meetings, cursor)
             caption = captioner.get_caption_for_present(presence_state)
+            display_caption = captioner.get_display_caption_for_present(presence_state)
             # Draw captions at bottom, wrap to fit
-            if caption:
+            if display_caption:
                 if speaker is not None:
                     try:
                         speaker.submit(caption)
@@ -718,7 +719,7 @@ def recognize_face():
                 font = cv2.FONT_HERSHEY_SIMPLEX
                 font_scale = 0.6
                 thickness = 2
-                words = caption.split()
+                words = display_caption.split()
                 lines = []
                 current = ""
                 for w in words:
