@@ -28,7 +28,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
+try:
+    import numpy as np
+except Exception as exc:  # pragma: no cover
+    np = None  # type: ignore[assignment]
+    _NP_IMPORT_ERROR = exc
+else:
+    _NP_IMPORT_ERROR = None
 
 try:
     import sounddevice as sd
@@ -51,20 +57,141 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from audio_analysis.transcription import (  # noqa: E402
-    SUPPORTED_TRANSLATION_LANGUAGES,
-    Transcriber,
-    language_label,
-)
+from audio_analysis.transcription import Transcriber  # noqa: E402
+
+
+SUPPORTED_TRANSLATION_LANGUAGES = ("es", "de")
+LANGUAGE_LABELS = {
+    "de": "German",
+    "es": "Spanish",
+    "en": "English",
+}
+
+
+def language_label(language: Optional[str]) -> Optional[str]:
+    if not language:
+        return None
+    return LANGUAGE_LABELS.get(language.strip().lower())
 
 
 @dataclass
 class ProbeResult:
     text: str
     detected_language: Optional[str]
+    source_language: Optional[str]
     translated: bool
     language_probability: Optional[float]
     used_hint: Optional[str]
+
+
+@dataclass
+class _LiveTranscriptionResult:
+    text: str
+    detected_language: Optional[str]
+    source_language: Optional[str]
+    translated: bool
+    language_probability: Optional[float]
+
+
+def _normalize_language(language: Optional[str]) -> Optional[str]:
+    if not language:
+        return None
+    normalized = language.strip().lower()
+    return normalized or None
+
+
+def _should_reuse_detected_language(
+    language: Optional[str],
+    probability: Optional[float],
+    min_probability: float,
+) -> bool:
+    if language not in SUPPORTED_TRANSLATION_LANGUAGES:
+        return False
+    if probability is None:
+        return True
+    return probability >= min_probability
+
+
+def _should_clear_cached_language(
+    language: Optional[str],
+    probability: Optional[float],
+    min_probability: float,
+) -> bool:
+    if language is None or language in SUPPORTED_TRANSLATION_LANGUAGES:
+        return False
+    if probability is None:
+        return False
+    return probability >= min_probability
+
+
+def _select_source_language(
+    detected_language: Optional[str],
+    probability: Optional[float],
+    cached_language: Optional[str],
+    min_probability: float,
+) -> tuple[Optional[str], Optional[str]]:
+    normalized_detected = _normalize_language(detected_language)
+    normalized_cached = _normalize_language(cached_language)
+
+    if _should_reuse_detected_language(normalized_detected, probability, min_probability):
+        return normalized_detected, normalized_detected
+    if _should_clear_cached_language(normalized_detected, probability, min_probability):
+        return None, None
+    if normalized_cached in SUPPORTED_TRANSLATION_LANGUAGES:
+        return normalized_cached, normalized_cached
+    return None, None
+
+
+def _transcribe_probe(
+    transcriber: Transcriber,
+    audio_path: str,
+    cached_language: Optional[str],
+    min_probability: float,
+) -> _LiveTranscriptionResult:
+    transcriber._ensure_model()
+    assert transcriber._model is not None
+
+    kwargs = {
+        "beam_size": 1,
+        "condition_on_previous_text": False,
+        "without_timestamps": True,
+        "vad_filter": False,
+    }
+
+    segments, info = transcriber._model.transcribe(audio_path, **kwargs)
+    parts = [seg.text.strip() for seg in segments]
+    detected_language = getattr(info, "language", None)
+    detected_language = _normalize_language(detected_language)
+    language_probability = getattr(info, "language_probability", None)
+    if language_probability is not None:
+        language_probability = float(language_probability)
+
+    translated = False
+    text = " ".join(part for part in parts if part)
+    _next_cached_language, source_language = _select_source_language(
+        detected_language,
+        language_probability,
+        cached_language,
+        min_probability,
+    )
+    if source_language in SUPPORTED_TRANSLATION_LANGUAGES:
+        translate_kwargs = dict(kwargs)
+        translate_kwargs["task"] = "translate"
+        translate_kwargs["language"] = source_language
+        translated_segments, _translated_info = transcriber._model.transcribe(audio_path, **translate_kwargs)
+        translated_parts = [seg.text.strip() for seg in translated_segments]
+        translated_text = " ".join(part for part in translated_parts if part)
+        if translated_text:
+            text = translated_text
+            translated = True
+
+    return _LiveTranscriptionResult(
+        text=text,
+        detected_language=source_language or detected_language,
+        source_language=source_language,
+        translated=translated,
+        language_probability=language_probability,
+    )
 
 
 class RollingMicrophoneBuffer:
@@ -154,6 +281,8 @@ def _resolve_device(device_arg: Optional[str]):
 
 
 def _write_temp_wav(audio_bytes: bytes, sample_rate: int, channels: int) -> str:
+    if np is None:
+        raise RuntimeError(f"numpy import failed: {_NP_IMPORT_ERROR}")
     if sf is None:
         raise RuntimeError(f"soundfile import failed: {_SF_IMPORT_ERROR}")
     audio = np.frombuffer(audio_bytes, dtype=np.int16)
@@ -165,22 +294,18 @@ def _write_temp_wav(audio_bytes: bytes, sample_rate: int, channels: int) -> str:
     return path
 
 
-def _should_lock_language(language: Optional[str], probability: Optional[float], min_probability: float) -> bool:
-    if language not in SUPPORTED_TRANSLATION_LANGUAGES:
-        return False
-    if probability is None:
-        return True
-    return probability >= min_probability
-
-
 def _render_result(result: ProbeResult) -> str:
     parts = []
-    if result.detected_language:
-        label = language_label(result.detected_language) or result.detected_language
+    primary_language = result.source_language or result.detected_language
+    if primary_language:
+        label = language_label(primary_language) or primary_language
         if result.language_probability is not None:
             parts.append(f"detected={label} ({result.language_probability:.2f})")
         else:
             parts.append(f"detected={label}")
+    if result.source_language and result.detected_language and result.source_language != result.detected_language:
+        raw_label = language_label(result.detected_language) or result.detected_language
+        parts.append(f"raw_detected={raw_label}")
     if result.used_hint:
         hint_label = language_label(result.used_hint) or result.used_hint
         parts.append(f"hint={hint_label}")
@@ -217,6 +342,9 @@ def main() -> int:
         return 2
     if sf is None:
         print(f"ERROR: soundfile import failed: {_SF_IMPORT_ERROR}")
+        return 2
+    if np is None:
+        print(f"ERROR: numpy import failed: {_NP_IMPORT_ERROR}")
         return 2
     if args.model.strip().lower().endswith(".en"):
         print("ERROR: English-only Whisper models (*.en) cannot translate German or Spanish.")
@@ -274,9 +402,11 @@ def main() -> int:
                 else:
                     language_hint = locked_language
 
-                live_result = transcriber.transcribe_live(
+                live_result = _transcribe_probe(
+                    transcriber,
                     wav_path,
-                    source_language_hint=language_hint,
+                    language_hint,
+                    args.min_lock_probability,
                 )
             finally:
                 try:
@@ -284,16 +414,18 @@ def main() -> int:
                 except OSError:
                     pass
 
-            if args.expected_language == "auto" and _should_lock_language(
-                live_result.detected_language,
-                live_result.language_probability,
-                args.min_lock_probability,
-            ):
-                locked_language = live_result.detected_language
+            if args.expected_language == "auto":
+                locked_language, _source_language = _select_source_language(
+                    live_result.source_language or live_result.detected_language,
+                    live_result.language_probability,
+                    locked_language,
+                    args.min_lock_probability,
+                )
 
             probe_result = ProbeResult(
                 text=(live_result.text or "").strip(),
                 detected_language=live_result.detected_language,
+                source_language=live_result.source_language,
                 translated=bool(live_result.translated),
                 language_probability=live_result.language_probability,
                 used_hint=language_hint,

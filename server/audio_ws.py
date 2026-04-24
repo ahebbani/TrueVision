@@ -61,6 +61,7 @@ class _AudioSession:
     detected_language: Optional[str] = None
     detected_language_probability: Optional[float] = None
     translation_enabled: bool = False
+    last_source_language: Optional[str] = None
 
 
 class AudioTranscriptionHandler:
@@ -266,8 +267,20 @@ class AudioTranscriptionHandler:
             return False
         return language in self.cfg.translation_source_languages()
 
+    @staticmethod
+    def _normalize_language(language: Optional[str]) -> Optional[str]:
+        if not language:
+            return None
+        normalized = language.strip().lower()
+        return normalized or None
+
+    def _clear_cached_language(self, sess: _AudioSession) -> None:
+        sess.detected_language = None
+        sess.detected_language_probability = None
+        sess.translation_enabled = False
+
     def _cache_language(self, sess: _AudioSession, result: _TranscriptionResult) -> bool:
-        language = (result.language or "").strip().lower() or None
+        language = self._normalize_language(result.language)
         if language is None:
             return False
         # Only lock the session to a translation language once we have a
@@ -284,26 +297,57 @@ class AudioTranscriptionHandler:
         sess.translation_enabled = True
         return changed
 
+    def _should_clear_cached_language(self, result: _TranscriptionResult) -> bool:
+        language = self._normalize_language(result.language)
+        if language is None or self._translation_enabled_for_language(language):
+            return False
+        return self._should_cache_language(result.language_probability)
+
+    def _select_translation_language(
+        self,
+        sess: _AudioSession,
+        result: _TranscriptionResult,
+    ) -> Optional[str]:
+        if self._cache_language(sess, result):
+            return sess.detected_language
+        if sess.translation_enabled and sess.detected_language:
+            if self._should_clear_cached_language(result):
+                self._clear_cached_language(sess)
+                return None
+            return sess.detected_language
+        if self._should_clear_cached_language(result):
+            self._clear_cached_language(sess)
+        return None
+
+    def _apply_translation(
+        self,
+        sess: _AudioSession,
+        wav_path: str,
+        detected_result: _TranscriptionResult,
+    ) -> _TranscriptionResult:
+        translation_language = self._select_translation_language(sess, detected_result)
+        if not translation_language:
+            return detected_result
+
+        translated_result = self._transcribe_wav(
+            wav_path,
+            task="translate",
+            language=translation_language,
+        )
+        translated_text = translated_result.text or detected_result.text
+        if detected_result.language == translation_language:
+            language_probability = detected_result.language_probability
+        else:
+            language_probability = sess.detected_language_probability
+        return _TranscriptionResult(
+            text=translated_text,
+            language=translation_language,
+            language_probability=language_probability,
+        )
+
     def _transcribe_session_wav(self, sess: _AudioSession, wav_path: str) -> _TranscriptionResult:
-        if sess.detected_language:
-            task = "translate" if sess.translation_enabled else "transcribe"
-            return self._transcribe_wav(
-                wav_path,
-                task=task,
-                language=sess.detected_language,
-            )
-
-        result = self._transcribe_wav(wav_path)
-        language_changed = self._cache_language(sess, result)
-
-        if language_changed and sess.translation_enabled and sess.detected_language:
-            return self._transcribe_wav(
-                wav_path,
-                task="translate",
-                language=sess.detected_language,
-            )
-
-        return result
+        detected_result = self._transcribe_wav(wav_path)
+        return self._apply_translation(sess, wav_path, detected_result)
 
     def _transcribe_buffer(self, sess: _AudioSession, buf: bytes) -> _TranscriptionResult:
         wav_path = self._buffer_to_wav(buf)
@@ -333,7 +377,7 @@ class AudioTranscriptionHandler:
         )
         result = self._transcribe_buffer(sess, live_buf)
         text = result.text
-        self._cache_language(sess, result)
+        sess.last_source_language = result.language if self._translation_enabled_for_language(result.language) else None
         sess.last_caption_time = now
         sess.full_transcript = text
         # Return the tail of the latest translated or transcribed text.
@@ -347,9 +391,9 @@ class AudioTranscriptionHandler:
 
     def caption_source_language(self, session_key: int) -> Optional[str]:
         sess = self._sessions.get(session_key)
-        if sess is None or not sess.translation_enabled:
+        if sess is None:
             return None
-        return sess.detected_language
+        return sess.last_source_language
 
     def final_transcribe(self, session_key: int) -> str:
         """Run a final full transcription on the complete session buffer."""
@@ -365,7 +409,7 @@ class AudioTranscriptionHandler:
         )
         result = self._transcribe_buffer(sess, bytes(sess.buffer))
         text = result.text
-        self._cache_language(sess, result)
+        sess.last_source_language = result.language if self._translation_enabled_for_language(result.language) else None
         sess.full_transcript = text
         print(
             f"[audio_ws] Final transcription complete for session {session_key}: "

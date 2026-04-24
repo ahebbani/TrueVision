@@ -45,14 +45,16 @@ class ServerAudioWsTests(unittest.TestCase):
         handler.append_audio(1, b"abcdefghijkl")
         handler.responses = [
             _TranscriptionResult(text="hola mundo", language="es", language_probability=0.92),
-            _TranscriptionResult(text="hello world", language="es", language_probability=0.92),
-            _TranscriptionResult(text="hello again", language="es", language_probability=0.95),
+            _TranscriptionResult(text="hello world", language="en", language_probability=0.99),
+            _TranscriptionResult(text="hola otra vez", language="es", language_probability=0.95),
+            _TranscriptionResult(text="hello again", language="en", language_probability=0.99),
         ]
 
         caption = handler.maybe_caption(1)
         self.assertEqual(caption, "hello world")
         self.assertEqual(handler.buffer_sizes, [8])
         self.assertEqual(handler.transcribe_calls[:2], [("transcribe", None), ("translate", "es")])
+        self.assertEqual(handler.caption_source_language(1), "es")
 
         sess = handler._sessions[1]
         self.assertEqual(sess.detected_language, "es")
@@ -62,7 +64,11 @@ class ServerAudioWsTests(unittest.TestCase):
         caption = handler.maybe_caption(1)
         self.assertEqual(caption, "hello again")
         self.assertEqual(handler.buffer_sizes, [8, 8])
-        self.assertEqual(handler.transcribe_calls[2], ("translate", "es"))
+        self.assertEqual(
+            handler.transcribe_calls[2:],
+            [("transcribe", None), ("translate", "es")],
+        )
+        self.assertEqual(handler.caption_source_language(1), "es")
 
     def test_live_caption_passes_through_unsupported_language(self):
         handler = _StubHandler(self._make_cfg())
@@ -110,6 +116,34 @@ class ServerAudioWsTests(unittest.TestCase):
             [("transcribe", None), ("transcribe", None), ("translate", "de")],
         )
 
+    def test_confident_english_clears_cached_translation_language(self):
+        cfg = self._make_cfg()
+        cfg.translation_detection_min_probability = 0.65
+        handler = _StubHandler(cfg)
+        handler.start_session(6)
+        handler.append_audio(6, b"abcdefghijkl")
+        handler.responses = [
+            _TranscriptionResult(text="hola mundo", language="es", language_probability=0.93),
+            _TranscriptionResult(text="hello world", language="en", language_probability=0.99),
+            _TranscriptionResult(text="hello there", language="en", language_probability=0.97),
+        ]
+
+        first_caption = handler.maybe_caption(6)
+        self.assertEqual(first_caption, "hello world")
+        self.assertEqual(handler.caption_source_language(6), "es")
+        self.assertEqual(handler._sessions[6].detected_language, "es")
+
+        handler.append_audio(6, b"mnop")
+        second_caption = handler.maybe_caption(6)
+        self.assertEqual(second_caption, "hello there")
+        self.assertIsNone(handler.caption_source_language(6))
+        self.assertIsNone(handler._sessions[6].detected_language)
+        self.assertFalse(handler._sessions[6].translation_enabled)
+        self.assertEqual(
+            handler.transcribe_calls,
+            [("transcribe", None), ("translate", "es"), ("transcribe", None)],
+        )
+
     def test_final_transcribe_uses_cached_translation_language(self):
         handler = _StubHandler(self._make_cfg())
         handler.start_session(3)
@@ -117,14 +151,16 @@ class ServerAudioWsTests(unittest.TestCase):
         sess = handler._sessions[3]
         sess.detected_language = "de"
         sess.translation_enabled = True
+        sess.detected_language_probability = 0.97
         handler.responses = [
+            _TranscriptionResult(text="guten morgen", language="de", language_probability=0.97),
             _TranscriptionResult(text="good morning", language="de", language_probability=0.97),
         ]
 
         transcript = handler.final_transcribe(3)
         self.assertEqual(transcript, "good morning")
         self.assertEqual(handler.buffer_sizes, [12])
-        self.assertEqual(handler.transcribe_calls, [("translate", "de")])
+        self.assertEqual(handler.transcribe_calls, [("transcribe", None), ("translate", "de")])
         self.assertEqual(handler.caption_source_language(3), "de")
 
     def test_english_only_whisper_model_disables_translation(self):
