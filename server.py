@@ -5,6 +5,7 @@ import time
 import pickle
 import tempfile
 import subprocess
+import threading
 from pathlib import Path
 from typing import Dict, Any, List
 
@@ -45,10 +46,9 @@ WHISPER_COMPUTE_TYPE = "int8"
 
 # Telegram hardcoded config.
 # Paste your real bot token below.
-# I am not reprinting the full token in chat for safety.
 TELEGRAM_BOT_TOKEN = "8651924169:AAFhja-ZRfqCEV3Q6yy4gZAM6tCIthpNLDg"
 
-# Same chat for all Telegram commands.
+# Same chat for all Telegram commands and incoming HUD notifications.
 TELEGRAM_CHAT_ID = "-5141486260"
 
 FACE_DB_PATH = Path("face_memory.pkl")
@@ -78,6 +78,11 @@ TELEGRAM_CAPTURE_ACTIVE = False
 TELEGRAM_MESSAGE_BUFFER: List[str] = []
 TELEGRAM_LAST_ACTIVITY = 0.0
 TELEGRAM_CAPTURE_TIMEOUT_SECONDS = 45
+
+# Incoming Telegram notifications from the configured chat.
+TELEGRAM_INCOMING_MESSAGES: List[Dict[str, Any]] = []
+TELEGRAM_UPDATE_OFFSET = 0
+TELEGRAM_POLL_RUNNING = False
 
 
 # =========================
@@ -276,7 +281,7 @@ latest_unknown_face: Dict[str, Any] = {
 
 
 # =========================
-# Telegram
+# Telegram Sending
 # =========================
 
 def send_telegram_message(text: str) -> Dict[str, Any]:
@@ -412,11 +417,6 @@ def process_telegram_command(transcript: str) -> Dict[str, Any]:
       I have another meeting.
       Telegram send
 
-    Also supported:
-      Telegram message I will be late
-      ... then later ...
-      Telegram send
-
     Cancel:
       Telegram cancel
     """
@@ -528,6 +528,114 @@ def process_telegram_command(transcript: str) -> Dict[str, Any]:
     return {
         "is_command": False
     }
+
+
+# =========================
+# Telegram Incoming Polling
+# =========================
+
+def add_incoming_telegram_message(message: Dict[str, Any]):
+    """
+    Store recent incoming Telegram messages for Pi HUD.
+    """
+
+    global TELEGRAM_INCOMING_MESSAGES
+
+    chat = message.get("chat", {})
+    chat_id = str(chat.get("id", ""))
+
+    # Only show messages from your configured chat.
+    if chat_id != str(TELEGRAM_CHAT_ID):
+        return
+
+    text = message.get("text", "").strip()
+
+    if not text:
+        return
+
+    sender = message.get("from", {})
+    sender_name = (
+        sender.get("first_name")
+        or sender.get("username")
+        or chat.get("title")
+        or "Telegram"
+    )
+
+    item = {
+        "text": text,
+        "sender": sender_name,
+        "chat_id": chat_id,
+        "date": message.get("date", int(time.time())),
+        "received_at": time.time()
+    }
+
+    TELEGRAM_INCOMING_MESSAGES.append(item)
+    TELEGRAM_INCOMING_MESSAGES = TELEGRAM_INCOMING_MESSAGES[-8:]
+
+    print(f"[DGX TELEGRAM INCOMING] {sender_name}: {text}")
+
+
+def telegram_poll_loop():
+    """
+    Polls Telegram for incoming messages from the configured chat.
+    """
+
+    global TELEGRAM_UPDATE_OFFSET
+    global TELEGRAM_POLL_RUNNING
+
+    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
+        print("[DGX TELEGRAM POLL] Bot token missing. Polling disabled.")
+        return
+
+    TELEGRAM_POLL_RUNNING = True
+
+    base_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+
+    print("[DGX TELEGRAM POLL] Started")
+
+    while True:
+        try:
+            params = {
+                "timeout": 20,
+                "offset": TELEGRAM_UPDATE_OFFSET,
+                "allowed_updates": json.dumps(["message"])
+            }
+
+            resp = requests.get(
+                f"{base_url}/getUpdates",
+                params=params,
+                timeout=30
+            )
+
+            data = resp.json()
+
+            if not data.get("ok"):
+                print("[DGX TELEGRAM POLL] API error:", data)
+                time.sleep(3)
+                continue
+
+            updates = data.get("result", [])
+
+            for update in updates:
+                TELEGRAM_UPDATE_OFFSET = max(
+                    TELEGRAM_UPDATE_OFFSET,
+                    update.get("update_id", 0) + 1
+                )
+
+                message = update.get("message")
+
+                if message:
+                    add_incoming_telegram_message(message)
+
+        except Exception as e:
+            print("[DGX TELEGRAM POLL] Error:", e)
+            time.sleep(3)
+
+
+@app.on_event("startup")
+def start_telegram_polling():
+    thread = threading.Thread(target=telegram_poll_loop, daemon=True)
+    thread.start()
 
 
 # =========================
@@ -726,6 +834,8 @@ def health():
         ),
         "telegram_capture_active": TELEGRAM_CAPTURE_ACTIVE,
         "telegram_buffer": " ".join(TELEGRAM_MESSAGE_BUFFER),
+        "telegram_poll_running": TELEGRAM_POLL_RUNNING,
+        "incoming_telegram_messages": len(TELEGRAM_INCOMING_MESSAGES),
         "latest_unknown_available": latest_unknown_face["encoding"] is not None
     }
 
@@ -761,14 +871,6 @@ def get_language():
 
 @app.post("/telegram")
 def telegram(payload: TelegramPayload):
-    """
-    Direct endpoint for testing Telegram.
-    Example:
-      curl -X POST http://127.0.0.1:8008/telegram \
-        -H "Content-Type: application/json" \
-        -d '{"command":"Hello from TrueVision"}'
-    """
-
     result = send_telegram_message(payload.command)
 
     return {
@@ -794,6 +896,28 @@ def telegram_state():
         "buffer": " ".join(TELEGRAM_MESSAGE_BUFFER),
         "last_activity": TELEGRAM_LAST_ACTIVITY,
         "timeout_seconds": TELEGRAM_CAPTURE_TIMEOUT_SECONDS
+    }
+
+
+@app.get("/telegram_notifications")
+def telegram_notifications():
+    return {
+        "ok": True,
+        "messages": TELEGRAM_INCOMING_MESSAGES[-5:],
+        "poll_running": TELEGRAM_POLL_RUNNING,
+        "chat_id": TELEGRAM_CHAT_ID
+    }
+
+
+@app.post("/telegram_notifications/clear")
+def clear_telegram_notifications():
+    global TELEGRAM_INCOMING_MESSAGES
+
+    TELEGRAM_INCOMING_MESSAGES = []
+
+    return {
+        "ok": True,
+        "messages": []
     }
 
 

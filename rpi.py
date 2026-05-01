@@ -39,12 +39,10 @@ SAMPLE_WIDTH_BYTES = 2
 AUDIO_CHUNK_SECONDS = 2.5
 AUDIO_CHUNK_BYTES = int(SAMPLE_RATE * SAMPLE_WIDTH_BYTES * AUDIO_CHUNK_SECONDS)
 
-# Smaller frame sent to DGX because display is 640x480
 FACE_SEND_INTERVAL_SECONDS = 0.35
 FACE_SEND_WIDTH = 320
 JPEG_QUALITY = 70
 
-# AR optic render target
 DISPLAY_WIDTH = 640
 DISPLAY_HEIGHT = 480
 
@@ -107,6 +105,7 @@ state = {
     "hud_camera_background": True,
 
     "reminders": [],
+    "telegram_notifications": [],
 
     "dgx_audio_connected": False,
     "dgx_face_connected": False,
@@ -365,7 +364,35 @@ def dgx_face_thread():
 
 
 # =========================
-# HUD Drawing
+# Telegram Notifications
+# =========================
+
+def telegram_notifications_thread():
+    """
+    Poll DGX for incoming Telegram messages and show them on HUD.
+    """
+
+    while state["running"]:
+        try:
+            resp = requests.get(
+                f"{DGX_HTTP_URL}/telegram_notifications",
+                timeout=5
+            )
+
+            data = resp.json()
+            messages = data.get("messages", [])
+
+            with state_lock:
+                state["telegram_notifications"] = messages[-5:]
+
+        except Exception:
+            pass
+
+        time.sleep(2)
+
+
+# =========================
+# HUD Drawing Helpers
 # =========================
 
 def wrap_text(text: str, max_chars: int = 64) -> List[str]:
@@ -385,6 +412,38 @@ def wrap_text(text: str, max_chars: int = 64) -> List[str]:
         lines.append(current)
 
     return lines
+
+
+def format_timestamp(ts):
+    if not ts:
+        return "never"
+
+    try:
+        return datetime.fromtimestamp(float(ts)).strftime("%b %d %I:%M %p").replace(" 0", " ")
+    except Exception:
+        return "unknown"
+
+
+def format_time_ago(ts):
+    if not ts:
+        return "never"
+
+    try:
+        diff = time.time() - float(ts)
+
+        if diff < 60:
+            return "just now"
+
+        if diff < 3600:
+            return f"{int(diff // 60)}m ago"
+
+        if diff < 86400:
+            return f"{int(diff // 3600)}h ago"
+
+        return f"{int(diff // 86400)}d ago"
+
+    except Exception:
+        return "unknown"
 
 
 def get_cpu_temp_c() -> float:
@@ -565,10 +624,22 @@ def hud_draw_info_cards(frame):
         news = state["news"]
         summary = state["summary"]
         reminders = list(state["reminders"])
+        telegram_notifications = list(state["telegram_notifications"])
 
     y = 80
 
     cards = []
+
+    # Telegram notifications get priority.
+    for msg in telegram_notifications[-3:][::-1]:
+        sender = msg.get("sender", "Telegram")
+        text = msg.get("text", "")
+        msg_time = format_time_ago(msg.get("date"))
+
+        cards.append((
+            "TELEGRAM",
+            f"{sender}: {text[:55]} ({msg_time})"
+        ))
 
     if weather:
         cards.append(("WEATHER", weather))
@@ -582,7 +653,7 @@ def hud_draw_info_cards(frame):
     for reminder in reminders[:3]:
         cards.append(("REMINDER", reminder[:70]))
 
-    for title, text in cards[:3]:
+    for title, text in cards[:4]:
         cv2.putText(
             frame,
             title,
@@ -644,15 +715,21 @@ def hud_draw_faces(frame):
         count = face.get("seen_count", None)
 
         if known:
+            last_seen = face.get("last_seen")
+            last_seen_text = format_timestamp(last_seen)
+            last_seen_ago = format_time_ago(last_seen)
+
             label = f"{name}"
-            sub_label = f"seen {count}x"
+            sub_label = f"seen {count}x | last {last_seen_ago}"
+            sub_label_2 = last_seen_text
         else:
             label = "Unknown"
             sub_label = "save from phone"
+            sub_label_2 = ""
 
         cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 1)
 
-        label_x = min(right + 8, w - 150)
+        label_x = min(right + 8, w - 160)
         label_y = max(top + 18, 70)
 
         cv2.putText(
@@ -668,7 +745,7 @@ def hud_draw_faces(frame):
 
         cv2.putText(
             frame,
-            sub_label[:24],
+            sub_label[:30],
             (label_x, label_y + 18),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.34,
@@ -676,6 +753,18 @@ def hud_draw_faces(frame):
             1,
             cv2.LINE_AA
         )
+
+        if sub_label_2:
+            cv2.putText(
+                frame,
+                sub_label_2[:24],
+                (label_x, label_y + 34),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.32,
+                (200, 200, 200),
+                1,
+                cv2.LINE_AA
+            )
 
 
 def hud_draw_captions(frame):
@@ -1683,6 +1772,7 @@ def get_state():
             "location": state["location"],
             "hud_camera_background": state["hud_camera_background"],
             "reminders": state["reminders"],
+            "telegram_notifications": state["telegram_notifications"],
             "uart_connected": state["uart_connected"],
             "dgx_audio_connected": state["dgx_audio_connected"],
             "dgx_face_connected": state["dgx_face_connected"],
@@ -1715,6 +1805,7 @@ def main():
         threading.Thread(target=uart_thread, daemon=True),
         threading.Thread(target=dgx_audio_thread, daemon=True),
         threading.Thread(target=dgx_face_thread, daemon=True),
+        threading.Thread(target=telegram_notifications_thread, daemon=True),
         threading.Thread(target=phone_controller_thread, daemon=True),
     ]
 
