@@ -1199,17 +1199,35 @@ def focus_truevision():
     return run_shell(["xdotool", "windowactivate", target])
 
 
+def minimize_truevision():
+    result = run_shell_wait(
+        ["xdotool", "search", "--name", "TrueVision"],
+        timeout=3
+    )
+
+    if result.get("ok") and result.get("stdout", "").strip():
+        window_ids = result["stdout"].strip().splitlines()
+        target = window_ids[-1]
+        return run_shell(["xdotool", "windowminimize", target])
+
+    return {
+        "ok": False,
+        "error": "TrueVision window not found"
+    }
+
+
 # =========================
-# Mouse / Phone Trackpad
+# Mouse / Joystick Control
 # =========================
 
 def mouse_move(dx: int, dy: int):
-    dx = max(-200, min(200, int(dx)))
-    dy = max(-200, min(200, int(dy)))
+    dx = max(-120, min(120, int(dx)))
+    dy = max(-120, min(120, int(dy)))
 
     return run_shell([
         "xdotool",
         "mousemove_relative",
+        "--sync",
         "--",
         str(dx),
         str(dy)
@@ -1255,14 +1273,18 @@ def mouse_drag_end():
 # =========================
 
 def open_browser_url(url: str):
+    # Hide HUD first so Chromium is visible on the optic.
+    minimize_truevision()
+
     try:
         subprocess.Popen([
             "chromium-browser",
             "--new-window",
+            "--start-maximized",
             url
         ])
 
-        time.sleep(1.0)
+        time.sleep(1.5)
         focus_chromium()
 
         return {
@@ -1347,7 +1369,6 @@ def youtube_key(control_name: str):
         }
 
     focus_result = focus_chromium()
-
     cmd_result = run_shell(controls[control_name])
 
     with state_lock:
@@ -1376,6 +1397,15 @@ def close_youtube():
 
 def return_to_hud():
     result = focus_truevision()
+
+    try:
+        cv2.setWindowProperty(
+            "TrueVision",
+            cv2.WND_PROP_FULLSCREEN,
+            cv2.WINDOW_FULLSCREEN
+        )
+    except Exception:
+        pass
 
     with state_lock:
         state["youtube_status"] = "HUD"
@@ -1713,20 +1743,19 @@ CONTROL_HTML = """
             padding-top: 14px;
         }
 
-        #trackpad {
-            width: 94%;
-            height: 280px;
-            margin: 10px auto;
-            background: #020617;
-            border: 2px solid #475569;
-            border-radius: 18px;
+        .joy {
+            height: 74px;
+            font-size: 30px;
             touch-action: none;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: #94a3b8;
-            font-size: 18px;
             user-select: none;
+        }
+
+        .joystick-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 8px;
+            width: 94%;
+            margin: auto;
         }
     </style>
 </head>
@@ -1780,8 +1809,21 @@ CONTROL_HTML = """
     </div>
 
     <div class="section">
-        <h3>Phone Trackpad</h3>
-        <div id="trackpad">Move finger here<br>Tap = left click</div>
+        <h3>Cursor Joystick</h3>
+
+        <div class="joystick-grid">
+            <div></div>
+            <button class="nav joy" data-dx="0" data-dy="-28">▲</button>
+            <div></div>
+
+            <button class="nav joy" data-dx="-28" data-dy="0">◀</button>
+            <button class="gray" onclick="mouseClick(1)">Click</button>
+            <button class="nav joy" data-dx="28" data-dy="0">▶</button>
+
+            <div></div>
+            <button class="nav joy" data-dx="0" data-dy="28">▼</button>
+            <div></div>
+        </div>
 
         <button class="gray" onclick="mouseClick(1)">Left Click</button>
         <button class="gray" onclick="mouseClick(3)">Right Click</button>
@@ -1831,10 +1873,9 @@ CONTROL_HTML = """
     <pre id="status">Ready</pre>
 
 <script>
-let lastTouchX = null;
-let lastTouchY = null;
-let lastMoveSent = 0;
-let didMove = false;
+let joystickTimer = null;
+let joystickDx = 0;
+let joystickDy = 0;
 
 async function setMode(mode) {
     const res = await fetch('/mode/' + mode, {method: 'POST'});
@@ -1937,6 +1978,64 @@ async function mouseMove(dx, dy) {
     });
 }
 
+function startJoystick(dx, dy) {
+    stopJoystick();
+
+    joystickDx = dx;
+    joystickDy = dy;
+
+    mouseMove(joystickDx, joystickDy);
+
+    joystickTimer = setInterval(function() {
+        mouseMove(joystickDx, joystickDy);
+    }, 70);
+}
+
+function stopJoystick() {
+    if (joystickTimer !== null) {
+        clearInterval(joystickTimer);
+        joystickTimer = null;
+    }
+}
+
+function setupJoystick() {
+    const buttons = document.querySelectorAll('.joy');
+
+    buttons.forEach(function(btn) {
+        const dx = parseInt(btn.getAttribute('data-dx'));
+        const dy = parseInt(btn.getAttribute('data-dy'));
+
+        btn.addEventListener('touchstart', function(e) {
+            e.preventDefault();
+            startJoystick(dx, dy);
+        }, {passive: false});
+
+        btn.addEventListener('touchend', function(e) {
+            e.preventDefault();
+            stopJoystick();
+        }, {passive: false});
+
+        btn.addEventListener('touchcancel', function(e) {
+            e.preventDefault();
+            stopJoystick();
+        }, {passive: false});
+
+        btn.addEventListener('mousedown', function(e) {
+            e.preventDefault();
+            startJoystick(dx, dy);
+        });
+
+        btn.addEventListener('mouseup', function(e) {
+            e.preventDefault();
+            stopJoystick();
+        });
+
+        btn.addEventListener('mouseleave', function(e) {
+            stopJoystick();
+        });
+    });
+}
+
 async function mouseClick(button) {
     const res = await fetch('/mouse/click', {
         method: 'POST',
@@ -1957,75 +2056,6 @@ async function mouseScroll(direction) {
 
     const data = await res.json();
     document.getElementById('status').innerText = JSON.stringify(data, null, 2);
-}
-
-function setupTrackpad() {
-    const pad = document.getElementById('trackpad');
-
-    if (!pad) {
-        return;
-    }
-
-    pad.addEventListener('touchstart', function(e) {
-        e.preventDefault();
-
-        didMove = false;
-
-        if (e.touches.length === 1) {
-            lastTouchX = e.touches[0].clientX;
-            lastTouchY = e.touches[0].clientY;
-        }
-    }, {passive: false});
-
-    pad.addEventListener('touchmove', async function(e) {
-        e.preventDefault();
-
-        if (e.touches.length !== 1) {
-            return;
-        }
-
-        const now = Date.now();
-
-        if (now - lastMoveSent < 25) {
-            return;
-        }
-
-        const x = e.touches[0].clientX;
-        const y = e.touches[0].clientY;
-
-        if (lastTouchX === null || lastTouchY === null) {
-            lastTouchX = x;
-            lastTouchY = y;
-            return;
-        }
-
-        let dx = x - lastTouchX;
-        let dy = y - lastTouchY;
-
-        if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
-            didMove = true;
-        }
-
-        lastTouchX = x;
-        lastTouchY = y;
-        lastMoveSent = now;
-
-        dx = Math.round(dx * 1.8);
-        dy = Math.round(dy * 1.8);
-
-        await mouseMove(dx, dy);
-    }, {passive: false});
-
-    pad.addEventListener('touchend', async function(e) {
-        e.preventDefault();
-
-        lastTouchX = null;
-        lastTouchY = null;
-
-        if (!didMove) {
-            await mouseClick(1);
-        }
-    }, {passive: false});
 }
 
 function sendLocation() {
@@ -2125,7 +2155,7 @@ async function refreshState() {
     document.getElementById('status').innerText = JSON.stringify(data, null, 2);
 }
 
-window.addEventListener('load', setupTrackpad);
+window.addEventListener('load', setupJoystick);
 setInterval(refreshState, 4000);
 </script>
 </body>
