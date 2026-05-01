@@ -23,7 +23,10 @@ run-server:
 		echo "[make] Server virtual environment missing at $(SERVER_VENV_ABS). Run 'make setup-server' first."; \
 		exit 1; \
 	fi
-	. "$(SERVER_VENV_ABS)/bin/activate" && python -m uvicorn server:app --host $(UVICORN_HOST) --port $(UVICORN_PORT)
+	. "$(SERVER_VENV_ABS)/bin/activate" && \
+		WHISPER_DEVICE=$${WHISPER_DEVICE:-cpu} \
+		WHISPER_COMPUTE_TYPE=$${WHISPER_COMPUTE_TYPE:-int8} \
+		python -m uvicorn server:app --host $(UVICORN_HOST) --port $(UVICORN_PORT)
 
 setup-pi:
 	PI_VENV_DIR="$(PI_VENV_ABS)" bash setup-pi.sh
