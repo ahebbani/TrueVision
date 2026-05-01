@@ -39,12 +39,14 @@ SAMPLE_WIDTH_BYTES = 2
 AUDIO_CHUNK_SECONDS = 2.5
 AUDIO_CHUNK_BYTES = int(SAMPLE_RATE * SAMPLE_WIDTH_BYTES * AUDIO_CHUNK_SECONDS)
 
+# Smaller face frame because HUD/display is now 640x480
 FACE_SEND_INTERVAL_SECONDS = 0.35
-FACE_SEND_WIDTH = 640
+FACE_SEND_WIDTH = 320
 JPEG_QUALITY = 70
 
-DISPLAY_WIDTH = 1280
-DISPLAY_HEIGHT = 720
+# AR optic target resolution
+DISPLAY_WIDTH = 640
+DISPLAY_HEIGHT = 480
 
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
@@ -100,12 +102,10 @@ state = {
     "news": "",
     "location": None,
 
-    # HUD display mode
-    # True  = show camera behind HUD
+    # True = show camera behind HUD
     # False = black background HUD
     "hud_camera_background": True,
 
-    # Optional reminder strings shown on HUD
     "reminders": [],
 
     "dgx_audio_connected": False,
@@ -422,9 +422,9 @@ def hud_draw_clock_date(frame):
     cv2.putText(
         frame,
         time_str,
-        (20, 42),
+        (12, 30),
         cv2.FONT_HERSHEY_SIMPLEX,
-        1.2,
+        0.78,
         (255, 255, 255),
         2,
         cv2.LINE_AA
@@ -433,10 +433,10 @@ def hud_draw_clock_date(frame):
     cv2.putText(
         frame,
         date_str,
-        (22, 74),
+        (13, 52),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.65,
-        (200, 200, 200),
+        0.43,
+        (205, 205, 205),
         1,
         cv2.LINE_AA
     )
@@ -458,8 +458,8 @@ def hud_draw_system_status(frame):
     mode_name = MODE_NAMES.get(mode, "UNKNOWN")
     server_available = audio_connected and face_connected
 
-    x = w - 355
-    y = 32
+    x = w - 230
+    y = 22
 
     temp = get_cpu_temp_c()
     temp_color = (0, 255, 0)
@@ -474,7 +474,7 @@ def hud_draw_system_status(frame):
         f"CPU {temp:.1f}C",
         (x, y),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.58,
+        0.40,
         temp_color,
         1,
         cv2.LINE_AA
@@ -485,76 +485,73 @@ def hud_draw_system_status(frame):
     cv2.putText(
         frame,
         f"WiFi {wifi}",
-        (x + 120, y),
+        (x + 90, y),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.58,
+        0.40,
         (255, 255, 255),
         1,
         cv2.LINE_AA
     )
 
-    y += 28
+    y += 18
 
     server_color = (0, 255, 0) if server_available else (0, 0, 255)
-    server_text = "Connected" if server_available else "Disconnected"
+    server_text = "OK" if server_available else "NO"
 
-    cv2.circle(frame, (x + 8, y - 5), 5, server_color, -1)
+    cv2.circle(frame, (x + 6, y - 4), 4, server_color, -1)
 
     cv2.putText(
         frame,
         f"DGX: {server_text}",
-        (x + 24, y),
+        (x + 16, y),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.58,
+        0.40,
         (255, 255, 255),
         1,
         cv2.LINE_AA
     )
 
-    y += 28
+    y += 18
 
-    bg_text = "Camera" if hud_camera_background else "Black"
+    bg_text = "Cam" if hud_camera_background else "Black"
 
     cv2.putText(
         frame,
-        f"Mode: {mode_name} | HUD: {bg_text}",
-        (x + 24, y),
+        f"{mode_name} | HUD:{bg_text}",
+        (x + 16, y),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.58,
+        0.40,
         (255, 210, 0),
-        2,
+        1,
         cv2.LINE_AA
     )
 
-    y += 28
+    y += 18
 
     cv2.putText(
         frame,
         f"UART: {'OK' if uart_connected else 'NO'}",
-        (x + 24, y),
+        (x + 16, y),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.52,
+        0.36,
         (180, 220, 255),
         1,
         cv2.LINE_AA
     )
 
-    y += 25
+    y += 17
 
-    lang_text = f"Lang: {selected_language}"
+    lang_text = f"Lang:{selected_language}"
 
     if last_language:
-        lang_text += f" | Detected: {last_language}"
-
-    if task:
-        lang_text += f" | {task}"
+        lang_text += f" Det:{last_language}"
 
     cv2.putText(
         frame,
-        lang_text,
-        (x + 24, y),
+        lang_text[:30],
+        (x + 16, y),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.50,
+        0.34,
         (180, 220, 255),
         1,
         cv2.LINE_AA
@@ -570,7 +567,7 @@ def hud_draw_info_cards(frame):
         summary = state["summary"]
         reminders = list(state["reminders"])
 
-    y = 115
+    y = 80
 
     cards = []
 
@@ -578,45 +575,45 @@ def hud_draw_info_cards(frame):
         cards.append(("WEATHER", weather))
 
     if news:
-        cards.append(("NEWS", news[:90]))
+        cards.append(("NEWS", news[:70]))
 
     if summary:
-        cards.append(("SUMMARY", summary[:90]))
+        cards.append(("SUMMARY", summary[:70]))
 
     for reminder in reminders[:3]:
-        cards.append(("REMINDER", reminder[:90]))
+        cards.append(("REMINDER", reminder[:70]))
 
-    for title, text in cards[:4]:
+    for title, text in cards[:3]:
         cv2.putText(
             frame,
             title,
-            (22, y),
+            (14, y),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.48,
+            0.36,
             (0, 220, 255),
             1,
             cv2.LINE_AA
         )
 
-        y += 23
+        y += 17
 
-        lines = wrap_text(text, max_chars=42)
+        lines = wrap_text(text, max_chars=32)
 
         for line in lines[:2]:
             cv2.putText(
                 frame,
                 line,
-                (22, y),
+                (14, y),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.52,
+                0.38,
                 (230, 230, 230),
                 1,
                 cv2.LINE_AA
             )
 
-            y += 23
+            y += 17
 
-        y += 13
+        y += 9
 
 
 def hud_draw_faces(frame):
@@ -654,28 +651,28 @@ def hud_draw_faces(frame):
             label = "Unknown"
             sub_label = "save from phone"
 
-        cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+        cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 1)
 
-        label_x = min(right + 12, w - 260)
-        label_y = max(top + 22, 95)
+        label_x = min(right + 8, w - 150)
+        label_y = max(top + 18, 70)
 
         cv2.putText(
             frame,
-            label,
+            label[:18],
             (label_x, label_y),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.70,
+            0.48,
             (255, 255, 255),
-            2,
+            1,
             cv2.LINE_AA
         )
 
         cv2.putText(
             frame,
-            sub_label,
-            (label_x, label_y + 26),
+            sub_label[:24],
+            (label_x, label_y + 18),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.52,
+            0.34,
             (180, 255, 180),
             1,
             cv2.LINE_AA
@@ -692,8 +689,6 @@ def hud_draw_captions(frame):
 
     h, w = frame.shape[:2]
 
-    source_language = selected_language
-
     lang_map = {
         "en": "English",
         "es": "Spanish",
@@ -705,20 +700,20 @@ def hud_draw_captions(frame):
 
     prefix = ""
 
-    if source_language and source_language != "en":
-        prefix = f"({lang_map.get(source_language, source_language.upper())}) "
+    if selected_language and selected_language != "en":
+        prefix = f"({lang_map.get(selected_language, selected_language.upper())}) "
 
     full_text = prefix + caption
 
     font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 0.78
-    thickness = 2
+    scale = 0.50
+    thickness = 1
 
     words = full_text.split()
     lines = []
     current = ""
 
-    max_width = w - 80
+    max_width = w - 50
 
     for word in words:
         test_line = current + word + " "
@@ -736,14 +731,14 @@ def hud_draw_captions(frame):
 
     lines_to_show = lines[-3:]
 
-    bg_height = len(lines_to_show) * 38 + 28
-    y_start = h - bg_height - 15
+    bg_height = len(lines_to_show) * 24 + 20
+    y_start = h - bg_height - 8
 
     overlay = frame.copy()
-    cv2.rectangle(overlay, (20, y_start), (w - 20, h - 15), (25, 25, 25), -1)
+    cv2.rectangle(overlay, (8, y_start), (w - 8, h - 8), (25, 25, 25), -1)
     cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
 
-    y = y_start + 38
+    y = y_start + 24
 
     for line in lines_to_show:
         if line.startswith("(") and ")" in line:
@@ -754,7 +749,7 @@ def hud_draw_captions(frame):
             cv2.putText(
                 frame,
                 lang_prefix,
-                (40, y),
+                (18, y),
                 font,
                 scale,
                 (0, 255, 255),
@@ -767,7 +762,7 @@ def hud_draw_captions(frame):
             cv2.putText(
                 frame,
                 rest,
-                (40 + prefix_size[0], y),
+                (18 + prefix_size[0], y),
                 font,
                 scale,
                 (255, 255, 255),
@@ -779,7 +774,7 @@ def hud_draw_captions(frame):
             cv2.putText(
                 frame,
                 line,
-                (40, y),
+                (18, y),
                 font,
                 scale,
                 (255, 255, 255),
@@ -787,7 +782,7 @@ def hud_draw_captions(frame):
                 cv2.LINE_AA
             )
 
-        y += 38
+        y += 24
 
 
 def render_hud_frame(camera_frame):
@@ -959,12 +954,10 @@ def camera_display_thread():
 
     last_face_send = 0
 
+    # Important: no fullscreen, exact AR optic resolution.
     cv2.namedWindow("TrueVision", cv2.WINDOW_NORMAL)
-
-    try:
-        cv2.setWindowProperty("TrueVision", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-    except Exception:
-        pass
+    cv2.resizeWindow("TrueVision", DISPLAY_WIDTH, DISPLAY_HEIGHT)
+    cv2.moveWindow("TrueVision", 0, 0)
 
     while state["running"]:
         ret, frame = cap.read()
@@ -977,7 +970,7 @@ def camera_display_thread():
         camera_frame = cv2.resize(frame, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
 
         # Always send the real camera frame to DGX for recognition,
-        # even when the display is in black HUD mode.
+        # even when display is black HUD mode.
         last_face_send = maybe_send_frame_to_dgx(camera_frame, last_face_send)
 
         hud_frame = render_hud_frame(camera_frame)
@@ -1708,6 +1701,7 @@ def main():
     print("[PI] DGX HTTP:", DGX_HTTP_URL)
     print("[PI] DGX Audio WS:", DGX_AUDIO_WS_URL)
     print("[PI] DGX Face WS:", DGX_FACE_WS_URL)
+    print("[PI] Display:", DISPLAY_WIDTH, "x", DISPLAY_HEIGHT)
 
     threads = [
         threading.Thread(target=uart_thread, daemon=True),
