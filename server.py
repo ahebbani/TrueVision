@@ -39,15 +39,18 @@ app = FastAPI(title="TrueVision DGX Server")
 # Config
 # =========================
 
-# Hardcoded so you do not need to export every time.
-# Use "tiny" for faster demo captions.
-# Use "base" for better quality.
 WHISPER_MODEL_SIZE = "base"
 WHISPER_DEVICE = "cpu"
 WHISPER_COMPUTE_TYPE = "int8"
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+# Telegram hardcoded config.
+# Paste your actual token into this line.
+TELEGRAM_BOT_TOKEN = "8651924169:AAFhja-ZRfqCEV3Q6yy4gZAM6tCIthpNLDg"
+
+TELEGRAM_CONTACTS = {
+    "hebbani": "-5141486260",
+    "group": "-5141486260",
+}
 
 FACE_DB_PATH = Path("face_memory.pkl")
 CONVERSATION_LOG_PATH = Path("conversation_log.txt")
@@ -57,13 +60,6 @@ FACE_COUNT_COOLDOWN_SECONDS = 10
 
 conversation_buffer: List[str] = []
 
-# Phone-selected language mode.
-# en = English transcription only
-# es = Spanish to English
-# de = German to English
-# ar = Arabic to English
-# hi = Hindi to English
-# ur = Urdu to English
 ACTIVE_LANGUAGE = "en"
 SUPPORTED_LANGUAGES = {"en", "es", "de", "ar", "hi", "ur"}
 
@@ -187,9 +183,6 @@ class FaceMemory:
         return None
 
     def save_new_person(self, name: str, encoding) -> str:
-        """
-        Manually save the latest unknown face with a user-provided name.
-        """
         now = time.time()
         clean_name = name.strip()
 
@@ -260,7 +253,6 @@ class FaceMemory:
 
 face_memory = FaceMemory(FACE_DB_PATH)
 
-# Latest unknown face. The phone UI saves this directly.
 latest_unknown_face: Dict[str, Any] = {
     "encoding": None,
     "updated_at": 0.0
@@ -271,26 +263,47 @@ latest_unknown_face: Dict[str, Any] = {
 # Telegram
 # =========================
 
-def send_telegram_message(text: str) -> Dict[str, Any]:
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+def send_telegram_message_to_chat(chat_id: str, text: str) -> Dict[str, Any]:
+    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
         return {
             "ok": False,
-            "error": "Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID"
+            "error": "Missing Telegram bot token. Paste it into TELEGRAM_BOT_TOKEN in app.py."
         }
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    if not chat_id:
+        return {
+            "ok": False,
+            "error": "Missing Telegram chat_id"
+        }
+
+    base_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
     try:
-        resp = requests.post(
-            url,
+        response = requests.post(
+            f"{base_url}/sendMessage",
             json={
-                "chat_id": TELEGRAM_CHAT_ID,
+                "chat_id": chat_id,
                 "text": text
             },
-            timeout=10
+            timeout=20
         )
 
-        return resp.json()
+        response.raise_for_status()
+        data = response.json()
+
+        if not data.get("ok"):
+            return {
+                "ok": False,
+                "error": f"Telegram API error: {data}"
+            }
+
+        return {
+            "ok": True,
+            "message_id": data["result"]["message_id"],
+            "chat_id": chat_id,
+            "text": text,
+            "raw": data
+        }
 
     except Exception as e:
         return {
@@ -299,7 +312,77 @@ def send_telegram_message(text: str) -> Dict[str, Any]:
         }
 
 
+def send_telegram_message(text: str) -> Dict[str, Any]:
+    default_chat_id = TELEGRAM_CONTACTS.get("group", "")
+    return send_telegram_message_to_chat(default_chat_id, text)
+
+
+def parse_message_to_contact(command_body: str) -> Dict[str, Any]:
+    """
+    Supports:
+      send message to hebbani I will be late
+      send telegram to hebbani I will be late
+      message to hebbani I will be late
+      telegram to hebbani I will be late
+      message hebbani I will be late
+      telegram hebbani I will be late
+    """
+
+    text = command_body.strip()
+    lower = text.lower()
+
+    prefixes = [
+        "send message to ",
+        "send telegram to ",
+        "message to ",
+        "telegram to ",
+        "message ",
+        "telegram ",
+    ]
+
+    for prefix in prefixes:
+        if lower.startswith(prefix):
+            remaining = text[len(prefix):].strip()
+
+            if not remaining:
+                return {
+                    "ok": False,
+                    "error": "Missing recipient and message"
+                }
+
+            parts = remaining.split(maxsplit=1)
+
+            if len(parts) < 2:
+                return {
+                    "ok": False,
+                    "error": "Missing message after recipient"
+                }
+
+            recipient = parts[0].strip().lower()
+            message = parts[1].strip()
+
+            return {
+                "ok": True,
+                "recipient": recipient,
+                "message": message
+            }
+
+    return {
+        "ok": False,
+        "error": "No contact-message pattern matched"
+    }
+
+
 def extract_assistant_command(text: str) -> Dict[str, Any]:
+    """
+    Examples:
+      Assistant send message to hebbani I will be late
+      Assistant send telegram to hebbani I will be late
+      Assistant message hebbani I will be late
+      Assistant telegram hebbani I will be late
+      Assistant send telegram TrueVision demo is working
+    """
+
     clean = text.strip()
     lowered = clean.lower()
 
@@ -311,27 +394,61 @@ def extract_assistant_command(text: str) -> Dict[str, Any]:
     body = clean[len("assistant"):].strip()
     body_lower = body.lower()
 
+    contact_parse = parse_message_to_contact(body)
+
+    if contact_parse.get("ok"):
+        recipient = contact_parse["recipient"]
+        message = contact_parse["message"]
+
+        chat_id = TELEGRAM_CONTACTS.get(recipient)
+
+        if not chat_id:
+            return {
+                "is_command": True,
+                "action": "telegram_contact",
+                "recipient": recipient,
+                "message": message,
+                "error": f"Unknown Telegram contact: {recipient}"
+            }
+
+        return {
+            "is_command": True,
+            "action": "telegram_contact",
+            "recipient": recipient,
+            "chat_id": chat_id,
+            "message": message
+        }
+
     if body_lower.startswith("send telegram"):
         msg = body[len("send telegram"):].strip()
+
         return {
             "is_command": True,
             "action": "telegram",
+            "recipient": "group",
+            "chat_id": TELEGRAM_CONTACTS.get("group", ""),
             "message": msg
         }
 
     if body_lower.startswith("telegram"):
         msg = body[len("telegram"):].strip()
+
         return {
             "is_command": True,
             "action": "telegram",
+            "recipient": "group",
+            "chat_id": TELEGRAM_CONTACTS.get("group", ""),
             "message": msg
         }
 
     if body_lower.startswith("message"):
         msg = body[len("message"):].strip()
+
         return {
             "is_command": True,
             "action": "telegram",
+            "recipient": "group",
+            "chat_id": TELEGRAM_CONTACTS.get("group", ""),
             "message": msg
         }
 
@@ -385,16 +502,6 @@ Conversation:
 # =========================
 
 def transcribe_wav_file(wav_path: str) -> Dict[str, Any]:
-    """
-    Uses phone-selected language mode.
-
-    en:
-        English transcription only.
-
-    es/de/ar/hi/ur:
-        Force Whisper to listen for that language and translate to English.
-    """
-
     global ACTIVE_LANGUAGE
 
     language = ACTIVE_LANGUAGE
@@ -427,11 +534,27 @@ def transcribe_wav_file(wav_path: str) -> Dict[str, Any]:
 
     telegram_result = None
 
-    if command.get("is_command") and command.get("action") == "telegram":
+    if command.get("is_command") and command.get("action") in ["telegram", "telegram_contact"]:
         msg = command.get("message", "").strip()
+        chat_id = command.get("chat_id", "")
 
-        if msg:
+        if command.get("error"):
+            telegram_result = {
+                "ok": False,
+                "error": command.get("error")
+            }
+
+        elif msg and chat_id:
+            telegram_result = send_telegram_message_to_chat(chat_id, msg)
+
+        elif msg:
             telegram_result = send_telegram_message(msg)
+
+        else:
+            telegram_result = {
+                "ok": False,
+                "error": "No Telegram message provided"
+            }
 
     if final_text:
         conversation_buffer.append(final_text)
@@ -539,6 +662,7 @@ def health():
         "known_faces": len(face_memory.known_names),
         "active_language": ACTIVE_LANGUAGE,
         "supported_languages": sorted(list(SUPPORTED_LANGUAGES)),
+        "telegram_contacts": sorted(list(TELEGRAM_CONTACTS.keys())),
         "latest_unknown_available": latest_unknown_face["encoding"] is not None
     }
 
@@ -574,10 +698,18 @@ def get_language():
 
 @app.post("/telegram")
 def telegram(payload: TelegramPayload):
+    """
+    Direct endpoint for default group Telegram.
+    Example:
+      curl -X POST http://127.0.0.1:8008/telegram \
+        -H "Content-Type: application/json" \
+        -d '{"command":"Hello from TrueVision"}'
+    """
+
     result = send_telegram_message(payload.command)
 
     return {
-        "ok": True,
+        "ok": result.get("ok", False),
         "telegram_result": result
     }
 
