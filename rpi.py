@@ -46,7 +46,10 @@ JPEG_QUALITY = 70
 DISPLAY_WIDTH = 640
 DISPLAY_HEIGHT = 480
 
-WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "")
+# Open-Meteo does not require an API key.
+DEFAULT_LAT = 40.4237
+DEFAULT_LON = -86.9212
+
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 
 
@@ -97,6 +100,8 @@ state = {
     "last_face_error": "",
 
     "weather": "",
+    "weather_temp": "--",
+    "weather_last_updated": 0,
     "news": "",
     "location": None,
 
@@ -490,6 +495,54 @@ def hud_draw_clock_date(frame):
     )
 
 
+def hud_draw_weather_slot(frame):
+    with state_lock:
+        temp = state.get("weather_temp", "--")
+        last_updated = state.get("weather_last_updated", 0)
+
+    if not temp:
+        temp = "--"
+
+    x = 14
+    y = 76
+
+    cv2.putText(
+        frame,
+        "TEMP",
+        (x, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.34,
+        (0, 220, 255),
+        1,
+        cv2.LINE_AA,
+    )
+
+    cv2.putText(
+        frame,
+        temp,
+        (x + 52, y + 1),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.46,
+        (255, 255, 255),
+        1,
+        cv2.LINE_AA,
+    )
+
+    if last_updated:
+        age = format_time_ago(last_updated)
+
+        cv2.putText(
+            frame,
+            age,
+            (x + 112, y + 1),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.32,
+            (170, 170, 170),
+            1,
+            cv2.LINE_AA,
+        )
+
+
 def hud_draw_system_status(frame):
     h, w = frame.shape[:2]
 
@@ -620,17 +673,13 @@ def hud_draw_system_status(frame):
 
 
 def hud_draw_info_cards(frame):
-    h, w = frame.shape[:2]
-
     with state_lock:
-        weather = state["weather"]
         news = state["news"]
         summary = state["summary"]
-        reminders = list(state["reminders"])
         telegram_notifications = list(state["telegram_notifications"])
         youtube_last_query = state["youtube_last_query"]
 
-    y = 80
+    y = 102
 
     cards = []
 
@@ -647,17 +696,11 @@ def hud_draw_info_cards(frame):
     if youtube_last_query:
         cards.append(("YOUTUBE", f"Last search: {youtube_last_query[:55]}"))
 
-    if weather:
-        cards.append(("WEATHER", weather))
-
     if news:
         cards.append(("NEWS", news[:70]))
 
     if summary:
         cards.append(("SUMMARY", summary[:70]))
-
-    for reminder in reminders[:3]:
-        cards.append(("REMINDER", reminder[:70]))
 
     for title, text in cards[:4]:
         cv2.putText(
@@ -690,6 +733,83 @@ def hud_draw_info_cards(frame):
             y += 17
 
         y += 9
+
+
+def hud_draw_reminders_slot(frame):
+    h, w = frame.shape[:2]
+
+    with state_lock:
+        reminders = list(state.get("reminders", []))
+
+    box_x = w - 230
+    box_y = 155
+    box_w = 215
+    box_h = 110
+
+    overlay = frame.copy()
+
+    cv2.rectangle(
+        overlay,
+        (box_x, box_y),
+        (box_x + box_w, box_y + box_h),
+        (15, 15, 15),
+        -1,
+    )
+
+    cv2.addWeighted(overlay, 0.58, frame, 0.42, 0, frame)
+
+    cv2.rectangle(
+        frame,
+        (box_x, box_y),
+        (box_x + box_w, box_y + box_h),
+        (70, 70, 70),
+        1,
+    )
+
+    cv2.putText(
+        frame,
+        "REMINDERS",
+        (box_x + 9, box_y + 18),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.36,
+        (0, 220, 255),
+        1,
+        cv2.LINE_AA,
+    )
+
+    if not reminders:
+        cv2.putText(
+            frame,
+            "No reminders",
+            (box_x + 9, box_y + 45),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.38,
+            (180, 180, 180),
+            1,
+            cv2.LINE_AA,
+        )
+        return
+
+    y = box_y + 42
+
+    for reminder in reminders[-3:]:
+        lines = wrap_text(reminder, max_chars=24)
+
+        for line in lines[:2]:
+            cv2.putText(
+                frame,
+                "• " + line[:26],
+                (box_x + 9, y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.34,
+                (235, 235, 235),
+                1,
+                cv2.LINE_AA,
+            )
+            y += 16
+
+            if y > box_y + box_h - 8:
+                return
 
 
 def hud_draw_faces(frame):
@@ -890,8 +1010,10 @@ def render_hud_frame(camera_frame):
         frame = np.zeros((DISPLAY_HEIGHT, DISPLAY_WIDTH, 3), dtype=np.uint8)
 
     hud_draw_clock_date(frame)
+    hud_draw_weather_slot(frame)
     hud_draw_system_status(frame)
     hud_draw_info_cards(frame)
+    hud_draw_reminders_slot(frame)
 
     if mode in [MODE_FACE, MODE_DUAL]:
         hud_draw_faces(frame)
@@ -1677,50 +1799,61 @@ def open_video_call():
 
 
 def fetch_weather():
-    if not WEATHER_API_KEY:
-        msg = "Weather API key not set on Pi."
-
-        with state_lock:
-            state["weather"] = msg
-            state["caption"] = msg
-
-        return
-
     with state_lock:
         loc = state["location"]
 
     if loc and "lat" in loc and "lon" in loc:
-        url = (
-            "https://api.openweathermap.org/data/2.5/weather"
-            f"?lat={loc['lat']}&lon={loc['lon']}&appid={WEATHER_API_KEY}&units=imperial"
-        )
+        lat = loc["lat"]
+        lon = loc["lon"]
     else:
-        url = (
-            "https://api.openweathermap.org/data/2.5/weather"
-            f"?q=West Lafayette,US&appid={WEATHER_API_KEY}&units=imperial"
-        )
+        lat = DEFAULT_LAT
+        lon = DEFAULT_LON
+
+    url = (
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={lat}&longitude={lon}"
+        "&current_weather=true"
+        "&temperature_unit=fahrenheit"
+    )
 
     try:
         data = requests.get(url, timeout=10).json()
+        current = data.get("current_weather", {})
+        temp = current.get("temperature", None)
 
-        desc = data["weather"][0]["description"]
-        temp = data["main"]["temp"]
+        if temp is None:
+            raise RuntimeError(f"No temperature in response: {data}")
 
-        msg = f"{temp:.0f}°F, {desc}"
+        temp_text = f"{float(temp):.0f}°F"
+        full_text = temp_text
 
         with state_lock:
-            state["weather"] = msg
-            state["caption"] = "Weather: " + msg
+            state["weather"] = full_text
+            state["weather_temp"] = temp_text
+            state["weather_last_updated"] = time.time()
 
-        print("[PI] Weather:", msg)
+        print("[PI] Weather:", full_text)
 
     except Exception as e:
         msg = f"Weather failed: {e}"
 
         with state_lock:
-            state["caption"] = msg
+            state["weather"] = msg
+            state["weather_temp"] = "--"
 
         print("[PI]", msg)
+
+
+def weather_refresh_thread():
+    time.sleep(3)
+
+    while state["running"]:
+        fetch_weather()
+
+        for _ in range(300):
+            if not state["running"]:
+                return
+            time.sleep(1)
 
 
 def fetch_news():
@@ -2703,9 +2836,12 @@ def update_location(payload: Dict[str, float]):
             "lon": payload["lon"],
         }
 
+    threading.Thread(target=fetch_weather, daemon=True).start()
+
     return {
         "ok": True,
         "location": state["location"],
+        "weather_update": "started",
     }
 
 
@@ -2761,6 +2897,8 @@ def get_state():
             "summary": state["summary"],
             "faces": state["faces"],
             "weather": state["weather"],
+            "weather_temp": state["weather_temp"],
+            "weather_last_updated": state["weather_last_updated"],
             "news": state["news"],
             "location": state["location"],
             "hud_camera_background": state["hud_camera_background"],
@@ -2802,6 +2940,7 @@ def main():
         threading.Thread(target=dgx_audio_thread, daemon=True),
         threading.Thread(target=dgx_face_thread, daemon=True),
         threading.Thread(target=telegram_notifications_thread, daemon=True),
+        threading.Thread(target=weather_refresh_thread, daemon=True),
         threading.Thread(target=phone_controller_thread, daemon=True),
     ]
 
