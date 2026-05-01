@@ -45,10 +45,10 @@ WHISPER_COMPUTE_TYPE = "int8"
 
 # Telegram hardcoded config.
 # Paste your real bot token below.
-# I am not reprinting the full token here for safety.
+# I am not reprinting the full token in chat for safety.
 TELEGRAM_BOT_TOKEN = "8651924169:AAFhja-ZRfqCEV3Q6yy4gZAM6tCIthpNLDg"
 
-# Same chat for all Assistant commands.
+# Same chat for all Telegram commands.
 TELEGRAM_CHAT_ID = "-5141486260"
 
 FACE_DB_PATH = Path("face_memory.pkl")
@@ -68,6 +68,16 @@ conversation_buffer: List[str] = []
 # ur = Urdu to English
 ACTIVE_LANGUAGE = "en"
 SUPPORTED_LANGUAGES = {"en", "es", "de", "ar", "hi", "ur"}
+
+
+# =========================
+# Buffered Telegram State
+# =========================
+
+TELEGRAM_CAPTURE_ACTIVE = False
+TELEGRAM_MESSAGE_BUFFER: List[str] = []
+TELEGRAM_LAST_ACTIVITY = 0.0
+TELEGRAM_CAPTURE_TIMEOUT_SECONDS = 45
 
 
 # =========================
@@ -271,7 +281,7 @@ latest_unknown_face: Dict[str, Any] = {
 
 def send_telegram_message(text: str) -> Dict[str, Any]:
     """
-    Sends every Assistant command message to the same Telegram chat.
+    Sends a Telegram message to the configured chat.
     """
 
     if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
@@ -322,101 +332,201 @@ def send_telegram_message(text: str) -> Dict[str, Any]:
         }
 
 
-def extract_message_after_assistant(text: str) -> Dict[str, Any]:
+def clean_telegram_text(text: str) -> str:
     """
-    Finds 'assistant' anywhere in the transcript and extracts the message.
-
-    Supported examples:
-      Assistant I will be late
-      Assistant send message I will be late
-      Assistant send message to hebbani I will be late
-      Assistant send telegram TrueVision demo is working
-      Hey assistant send message to hebbani I will be late
+    Cleans common speech artifacts and command punctuation.
     """
 
     clean = text.strip()
-    lowered = clean.lower()
 
-    if "assistant" not in lowered:
+    while "  " in clean:
+        clean = clean.replace("  ", " ")
+
+    return clean.strip(" .,")
+
+
+def strip_start_words(text: str) -> str:
+    """
+    After the user says 'Telegram ...', remove helper words.
+    """
+
+    clean = text.strip()
+    lower = clean.lower()
+
+    prefixes = [
+        "start ",
+        "begin ",
+        "message ",
+        "text ",
+        "send message ",
+        "send text ",
+        "send telegram ",
+    ]
+
+    for prefix in prefixes:
+        if lower.startswith(prefix):
+            return clean[len(prefix):].strip()
+
+    return clean
+
+
+def reset_telegram_capture():
+    global TELEGRAM_CAPTURE_ACTIVE
+    global TELEGRAM_MESSAGE_BUFFER
+    global TELEGRAM_LAST_ACTIVITY
+
+    TELEGRAM_CAPTURE_ACTIVE = False
+    TELEGRAM_MESSAGE_BUFFER = []
+    TELEGRAM_LAST_ACTIVITY = 0.0
+
+
+def send_telegram_buffer() -> Dict[str, Any]:
+    global TELEGRAM_CAPTURE_ACTIVE
+    global TELEGRAM_MESSAGE_BUFFER
+    global TELEGRAM_LAST_ACTIVITY
+
+    message = " ".join(TELEGRAM_MESSAGE_BUFFER)
+    message = clean_telegram_text(message)
+
+    if not message:
+        reset_telegram_capture()
+        return {
+            "ok": False,
+            "error": "Telegram buffer was empty."
+        }
+
+    result = send_telegram_message(message)
+
+    reset_telegram_capture()
+
+    return result
+
+
+def process_telegram_command(transcript: str) -> Dict[str, Any]:
+    """
+    Buffered Telegram command system.
+
+    Recommended voice flow:
+      Telegram start
+      I will not be going to the presentation.
+      I have another meeting.
+      Telegram send
+
+    Also supported:
+      Telegram message I will be late
+      ... then later ...
+      Telegram send
+
+    Cancel:
+      Telegram cancel
+    """
+
+    global TELEGRAM_CAPTURE_ACTIVE
+    global TELEGRAM_MESSAGE_BUFFER
+    global TELEGRAM_LAST_ACTIVITY
+
+    raw = transcript.strip()
+
+    if not raw:
         return {
             "is_command": False
         }
 
-    assistant_idx = lowered.find("assistant")
-    body = clean[assistant_idx + len("assistant"):].strip()
-    body_lower = body.lower()
+    lower = raw.lower()
+    now = time.time()
 
-    if not body:
+    # Auto-timeout stale captures.
+    if TELEGRAM_CAPTURE_ACTIVE and TELEGRAM_LAST_ACTIVITY:
+        if now - TELEGRAM_LAST_ACTIVITY > TELEGRAM_CAPTURE_TIMEOUT_SECONDS:
+            print("[DGX TELEGRAM] Capture timed out. Clearing buffer.")
+            reset_telegram_capture()
+
+    # Cancel command.
+    if "telegram cancel" in lower or "cancel telegram" in lower:
+        reset_telegram_capture()
         return {
             "is_command": True,
-            "action": "telegram",
+            "action": "telegram_cancel",
             "message": "",
-            "error": "Assistant heard, but no message was provided."
+            "telegram_result": {
+                "ok": True,
+                "status": "Telegram message canceled."
+            }
         }
 
-    # Remove common command phrases.
-    prefixes = [
-        "send message to ",
-        "send telegram to ",
-        "send text to ",
-        "message to ",
-        "telegram to ",
-        "text to ",
-        "send message ",
-        "send telegram ",
-        "send text ",
-        "message ",
-        "telegram ",
-        "text ",
-        "send ",
+    # Send command while actively capturing.
+    send_phrases = [
+        "telegram send",
+        "send telegram",
+        "telegram send it",
+        "send it telegram",
     ]
 
-    for prefix in prefixes:
-        if body_lower.startswith(prefix):
-            body = body[len(prefix):].strip()
-            body_lower = body.lower()
-            break
+    for phrase in send_phrases:
+        if phrase in lower:
+            idx = lower.find(phrase)
 
-    # If phrase was "to hebbani I will be late", remove recipient.
-    if body_lower.startswith("to "):
-        body = body[3:].strip()
-        parts = body.split(maxsplit=1)
+            # If there are words before the send phrase, append them first.
+            before = raw[:idx].strip()
+            before_lower = before.lower()
 
-        if len(parts) == 2:
-            body = parts[1].strip()
+            if TELEGRAM_CAPTURE_ACTIVE and before and "telegram" not in before_lower:
+                TELEGRAM_MESSAGE_BUFFER.append(before)
 
-    # If phrase is "hebbani I will be late", remove first word if it looks like a recipient.
-    parts = body.split(maxsplit=1)
+            result = send_telegram_buffer()
 
-    if len(parts) == 2:
-        possible_recipient = parts[0].strip().lower()
-        known_recipient_words = {
-            "hebbani",
-            "group",
-            "aditya",
-            "zohaib",
-            "mom",
-            "dad",
-            "team"
-        }
+            return {
+                "is_command": True,
+                "action": "telegram_send",
+                "message": result.get("text", ""),
+                "telegram_result": result
+            }
 
-        if possible_recipient in known_recipient_words:
-            body = parts[1].strip()
+    # Start capture if the wake word appears anywhere.
+    if "telegram" in lower:
+        idx = lower.find("telegram")
+        after = raw[idx + len("telegram"):].strip()
+        after = strip_start_words(after)
+        after = clean_telegram_text(after)
 
-    message = body.strip()
+        TELEGRAM_CAPTURE_ACTIVE = True
+        TELEGRAM_LAST_ACTIVITY = now
 
-    if not message:
+        if after:
+            TELEGRAM_MESSAGE_BUFFER.append(after)
+
         return {
             "is_command": True,
-            "action": "telegram",
-            "message": "",
-            "error": "No Telegram message found after Assistant command."
+            "action": "telegram_capture",
+            "message": " ".join(TELEGRAM_MESSAGE_BUFFER),
+            "telegram_result": {
+                "ok": True,
+                "status": "Capturing Telegram message. Say 'Telegram send' to send.",
+                "buffer": " ".join(TELEGRAM_MESSAGE_BUFFER)
+            }
+        }
+
+    # If capture is active, append normal speech to buffer.
+    if TELEGRAM_CAPTURE_ACTIVE:
+        clean = clean_telegram_text(raw)
+
+        if clean:
+            TELEGRAM_MESSAGE_BUFFER.append(clean)
+            TELEGRAM_LAST_ACTIVITY = now
+
+        return {
+            "is_command": True,
+            "action": "telegram_capture_append",
+            "message": " ".join(TELEGRAM_MESSAGE_BUFFER),
+            "telegram_result": {
+                "ok": True,
+                "status": "Added to Telegram buffer.",
+                "buffer": " ".join(TELEGRAM_MESSAGE_BUFFER)
+            }
         }
 
     return {
-        "is_command": True,
-        "action": "telegram",
-        "message": message
+        "is_command": False
     }
 
 
@@ -493,32 +603,15 @@ def transcribe_wav_file(wav_path: str) -> Dict[str, Any]:
 
     print(f"[DGX TRANSCRIPT] selected={language} detected={detected_language} task={task}: {final_text}")
 
-    command = extract_message_after_assistant(final_text)
+    command = process_telegram_command(final_text)
 
-    telegram_result = None
+    telegram_result = command.get("telegram_result")
 
     if command.get("is_command"):
-        print(f"[DGX ASSISTANT COMMAND] {command}")
+        print(f"[DGX TELEGRAM COMMAND] {command}")
 
-        msg = command.get("message", "").strip()
-
-        if command.get("error"):
-            telegram_result = {
-                "ok": False,
-                "error": command.get("error")
-            }
-            print(f"[DGX TELEGRAM ERROR] {telegram_result}")
-
-        elif msg:
-            telegram_result = send_telegram_message(msg)
+        if telegram_result:
             print(f"[DGX TELEGRAM RESULT] {telegram_result}")
-
-        else:
-            telegram_result = {
-                "ok": False,
-                "error": "No Telegram message provided"
-            }
-            print(f"[DGX TELEGRAM ERROR] {telegram_result}")
 
     if final_text:
         conversation_buffer.append(final_text)
@@ -631,6 +724,8 @@ def health():
             and TELEGRAM_BOT_TOKEN != "PASTE_YOUR_BOT_TOKEN_HERE"
             and TELEGRAM_CHAT_ID
         ),
+        "telegram_capture_active": TELEGRAM_CAPTURE_ACTIVE,
+        "telegram_buffer": " ".join(TELEGRAM_MESSAGE_BUFFER),
         "latest_unknown_available": latest_unknown_face["encoding"] is not None
     }
 
@@ -679,6 +774,26 @@ def telegram(payload: TelegramPayload):
     return {
         "ok": result.get("ok", False),
         "telegram_result": result
+    }
+
+
+@app.post("/telegram_reset")
+def telegram_reset():
+    reset_telegram_capture()
+
+    return {
+        "ok": True,
+        "status": "Telegram capture reset."
+    }
+
+
+@app.get("/telegram_state")
+def telegram_state():
+    return {
+        "capture_active": TELEGRAM_CAPTURE_ACTIVE,
+        "buffer": " ".join(TELEGRAM_MESSAGE_BUFFER),
+        "last_activity": TELEGRAM_LAST_ACTIVITY,
+        "timeout_seconds": TELEGRAM_CAPTURE_TIMEOUT_SECONDS
     }
 
 
