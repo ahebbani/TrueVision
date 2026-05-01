@@ -5,9 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${SERVER_VENV_DIR:-$ROOT_DIR/.venv-server}"
 PYTHON_BIN="${SERVER_PYTHON_BIN:-python3}"
 
-echo "[setup-server] Creating virtual environment at $VENV_DIR"
+echo "[setup-server] Rebuilding virtual environment at $VENV_DIR"
 
-"$PYTHON_BIN" -m venv "$VENV_DIR"
+"$PYTHON_BIN" -m venv --clear "$VENV_DIR"
 "$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel
 "$VENV_DIR/bin/python" -m pip install \
   numpy \
@@ -16,9 +16,10 @@ echo "[setup-server] Creating virtual environment at $VENV_DIR"
   fastapi \
   pydantic \
   "uvicorn[standard]" \
-  faster-whisper \
-  face-recognition-models \
-  face-recognition
+    faster-whisper
+"$VENV_DIR/bin/python" -m pip install --upgrade --force-reinstall \
+    face-recognition-models \
+    face-recognition
 
 "$VENV_DIR/bin/python" - <<'PY'
 import importlib
