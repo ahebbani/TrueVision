@@ -68,13 +68,13 @@ MODE_DUAL = 0x02
 MODE_NAMES = {
     MODE_AUDIO: "AUDIO",
     MODE_FACE: "FACE",
-    MODE_DUAL: "DUAL"
+    MODE_DUAL: "DUAL",
 }
 
 MODE_FROM_NAME = {
     "audio": MODE_AUDIO,
     "face": MODE_FACE,
-    "dual": MODE_DUAL
+    "dual": MODE_DUAL,
 }
 
 
@@ -129,7 +129,7 @@ class UARTPacketReader:
         self.ser = serial.Serial(
             port=port,
             baudrate=baud,
-            timeout=0.05
+            timeout=0.05,
         )
 
     def read_packet(self) -> Optional[Dict[str, Any]]:
@@ -171,7 +171,7 @@ class UARTPacketReader:
 
         return {
             "type": pkt_type,
-            "payload": payload
+            "payload": payload,
         }
 
 
@@ -366,7 +366,7 @@ def telegram_notifications_thread():
         try:
             resp = requests.get(
                 f"{DGX_HTTP_URL}/telegram_notifications",
-                timeout=5
+                timeout=5,
             )
 
             data = resp.json()
@@ -448,7 +448,7 @@ def get_wifi_signal() -> str:
     try:
         output = subprocess.check_output(
             ["iwconfig", "wlan0"],
-            stderr=subprocess.DEVNULL
+            stderr=subprocess.DEVNULL,
         ).decode("utf-8", errors="ignore")
 
         if "Signal level=" in output:
@@ -476,7 +476,7 @@ def hud_draw_clock_date(frame):
         0.78,
         (255, 255, 255),
         2,
-        cv2.LINE_AA
+        cv2.LINE_AA,
     )
 
     cv2.putText(
@@ -487,7 +487,7 @@ def hud_draw_clock_date(frame):
         0.43,
         (205, 205, 205),
         1,
-        cv2.LINE_AA
+        cv2.LINE_AA,
     )
 
 
@@ -526,7 +526,7 @@ def hud_draw_system_status(frame):
         0.40,
         temp_color,
         1,
-        cv2.LINE_AA
+        cv2.LINE_AA,
     )
 
     wifi = get_wifi_signal()
@@ -539,7 +539,7 @@ def hud_draw_system_status(frame):
         0.40,
         (255, 255, 255),
         1,
-        cv2.LINE_AA
+        cv2.LINE_AA,
     )
 
     y += 18
@@ -557,7 +557,7 @@ def hud_draw_system_status(frame):
         0.40,
         (255, 255, 255),
         1,
-        cv2.LINE_AA
+        cv2.LINE_AA,
     )
 
     y += 18
@@ -572,7 +572,7 @@ def hud_draw_system_status(frame):
         0.40,
         (255, 210, 0),
         1,
-        cv2.LINE_AA
+        cv2.LINE_AA,
     )
 
     y += 18
@@ -585,7 +585,7 @@ def hud_draw_system_status(frame):
         0.36,
         (180, 220, 255),
         1,
-        cv2.LINE_AA
+        cv2.LINE_AA,
     )
 
     y += 17
@@ -603,7 +603,7 @@ def hud_draw_system_status(frame):
         0.34,
         (180, 220, 255),
         1,
-        cv2.LINE_AA
+        cv2.LINE_AA,
     )
 
     if youtube_status:
@@ -616,7 +616,7 @@ def hud_draw_system_status(frame):
             0.34,
             (255, 180, 180),
             1,
-            cv2.LINE_AA
+            cv2.LINE_AA,
         )
 
 
@@ -642,7 +642,7 @@ def hud_draw_info_cards(frame):
 
         cards.append((
             "TELEGRAM",
-            f"{sender}: {text[:55]} ({msg_time})"
+            f"{sender}: {text[:55]} ({msg_time})",
         ))
 
     if youtube_last_query:
@@ -669,7 +669,7 @@ def hud_draw_info_cards(frame):
             0.36,
             (0, 220, 255),
             1,
-            cv2.LINE_AA
+            cv2.LINE_AA,
         )
 
         y += 17
@@ -685,7 +685,7 @@ def hud_draw_info_cards(frame):
                 0.38,
                 (230, 230, 230),
                 1,
-                cv2.LINE_AA
+                cv2.LINE_AA,
             )
 
             y += 17
@@ -747,7 +747,7 @@ def hud_draw_faces(frame):
             0.48,
             (255, 255, 255),
             1,
-            cv2.LINE_AA
+            cv2.LINE_AA,
         )
 
         cv2.putText(
@@ -758,7 +758,7 @@ def hud_draw_faces(frame):
             0.34,
             (180, 255, 180),
             1,
-            cv2.LINE_AA
+            cv2.LINE_AA,
         )
 
         if sub_label_2:
@@ -770,7 +770,7 @@ def hud_draw_faces(frame):
                 0.32,
                 (200, 200, 200),
                 1,
-                cv2.LINE_AA
+                cv2.LINE_AA,
             )
 
 
@@ -790,7 +790,7 @@ def hud_draw_captions(frame):
         "de": "German",
         "ar": "Arabic",
         "hi": "Hindi",
-        "ur": "Urdu"
+        "ur": "Urdu",
     }
 
     prefix = ""
@@ -849,7 +849,7 @@ def hud_draw_captions(frame):
                 scale,
                 (0, 255, 255),
                 thickness,
-                cv2.LINE_AA
+                cv2.LINE_AA,
             )
 
             prefix_size, _ = cv2.getTextSize(lang_prefix, font, scale, thickness)
@@ -862,7 +862,7 @@ def hud_draw_captions(frame):
                 scale,
                 (255, 255, 255),
                 thickness,
-                cv2.LINE_AA
+                cv2.LINE_AA,
             )
 
         else:
@@ -874,7 +874,7 @@ def hud_draw_captions(frame):
                 scale,
                 (255, 255, 255),
                 thickness,
-                cv2.LINE_AA
+                cv2.LINE_AA,
             )
 
         y += 24
@@ -928,7 +928,7 @@ def maybe_send_frame_to_dgx(frame, last_send_time):
     ok, jpg = cv2.imencode(
         ".jpg",
         small,
-        [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
+        [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY],
     )
 
     if not ok:
@@ -972,7 +972,7 @@ def camera_display_thread():
             config = self._picam2.create_preview_configuration(
                 main={
                     "size": (width, height),
-                    "format": "BGR888"
+                    "format": "BGR888",
                 }
             )
 
@@ -997,6 +997,7 @@ def camera_display_thread():
 
         def release(self):
             self._picam2.stop()
+
             try:
                 self._picam2.close()
             except Exception:
@@ -1050,7 +1051,7 @@ def camera_display_thread():
         cv2.setWindowProperty(
             "TrueVision",
             cv2.WND_PROP_FULLSCREEN,
-            cv2.WINDOW_FULLSCREEN
+            cv2.WINDOW_FULLSCREEN,
         )
     except Exception as e:
         print("[PI] Could not enable fullscreen:", e)
@@ -1118,6 +1119,11 @@ def desktop_env():
     if os.path.exists(xauth):
         env.setdefault("XAUTHORITY", xauth)
 
+    env["PATH"] = env.get(
+        "PATH",
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    )
+
     return env
 
 
@@ -1127,19 +1133,19 @@ def run_shell(cmd: List[str]):
             cmd,
             env=desktop_env(),
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+            stderr=subprocess.DEVNULL,
         )
 
         return {
             "ok": True,
-            "cmd": cmd
+            "cmd": cmd,
         }
 
     except Exception as e:
         return {
             "ok": False,
             "error": str(e),
-            "cmd": cmd
+            "cmd": cmd,
         }
 
 
@@ -1150,7 +1156,7 @@ def run_shell_wait(cmd: List[str], timeout: int = 5):
             env=desktop_env(),
             capture_output=True,
             text=True,
-            timeout=timeout
+            timeout=timeout,
         )
 
         return {
@@ -1158,22 +1164,25 @@ def run_shell_wait(cmd: List[str], timeout: int = 5):
             "cmd": cmd,
             "stdout": result.stdout,
             "stderr": result.stderr,
-            "returncode": result.returncode
+            "returncode": result.returncode,
         }
 
     except Exception as e:
         return {
             "ok": False,
             "error": str(e),
-            "cmd": cmd
+            "cmd": cmd,
         }
 
 
 def get_browser_cmd():
     candidates = [
+        "firefox",
+        "firefox-esr",
+        "x-www-browser",
         "chromium-browser",
         "chromium",
-        "google-chrome"
+        "google-chrome",
     ]
 
     for candidate in candidates:
@@ -1188,14 +1197,14 @@ def get_browser_cmd():
 def focus_window_by_class(window_class: str):
     result = run_shell_wait(
         ["xdotool", "search", "--class", window_class],
-        timeout=3
+        timeout=3,
     )
 
     if not result.get("ok") or not result.get("stdout", "").strip():
         return {
             "ok": False,
             "error": f"No window found for class {window_class}",
-            "details": result
+            "details": result,
         }
 
     window_ids = result["stdout"].strip().splitlines()
@@ -1205,16 +1214,19 @@ def focus_window_by_class(window_class: str):
         "xdotool",
         "windowactivate",
         "--sync",
-        target
+        target,
     ])
 
 
-def focus_chromium():
+def focus_browser():
     classes = [
+        "firefox",
+        "Firefox",
+        "Navigator",
         "chromium",
         "Chromium",
         "chrome",
-        "Google-chrome"
+        "Google-chrome",
     ]
 
     last_result = None
@@ -1228,22 +1240,22 @@ def focus_chromium():
 
     return {
         "ok": False,
-        "error": "Could not focus Chromium/Chrome",
-        "last_result": last_result
+        "error": "Could not focus browser",
+        "last_result": last_result,
     }
 
 
 def focus_truevision():
     result = run_shell_wait(
         ["xdotool", "search", "--name", "TrueVision"],
-        timeout=3
+        timeout=3,
     )
 
     if not result.get("ok") or not result.get("stdout", "").strip():
         return {
             "ok": False,
             "error": "TrueVision HUD window not found",
-            "details": result
+            "details": result,
         }
 
     window_ids = result["stdout"].strip().splitlines()
@@ -1253,14 +1265,14 @@ def focus_truevision():
         "xdotool",
         "windowactivate",
         "--sync",
-        target
+        target,
     ])
 
 
 def minimize_truevision():
     result = run_shell_wait(
         ["xdotool", "search", "--name", "TrueVision"],
-        timeout=3
+        timeout=3,
     )
 
     if result.get("ok") and result.get("stdout", "").strip():
@@ -1270,13 +1282,13 @@ def minimize_truevision():
         return run_shell([
             "xdotool",
             "windowminimize",
-            target
+            target,
         ])
 
     return {
         "ok": False,
         "error": "TrueVision window not found",
-        "details": result
+        "details": result,
     }
 
 
@@ -1293,7 +1305,7 @@ def mouse_move(dx: int, dy: int):
         "mousemove_relative",
         "--",
         str(dx),
-        str(dy)
+        str(dy),
     ])
 
 
@@ -1306,7 +1318,7 @@ def mouse_click(button: int = 1):
     return run_shell([
         "xdotool",
         "click",
-        str(button)
+        str(button),
     ])
 
 
@@ -1319,7 +1331,7 @@ def mouse_scroll(direction: str):
 
     return {
         "ok": False,
-        "error": "Unknown scroll direction"
+        "error": "Unknown scroll direction",
     }
 
 
@@ -1332,7 +1344,58 @@ def mouse_drag_end():
 
 
 # =========================
-# YouTube / Browser Controls
+# Keyboard / Phone Typing
+# =========================
+
+def keyboard_type_text(text: str):
+    clean = str(text)
+
+    if not clean:
+        return {
+            "ok": False,
+            "error": "Missing text",
+        }
+
+    return run_shell([
+        "xdotool",
+        "type",
+        "--clearmodifiers",
+        "--delay",
+        "5",
+        "--",
+        clean,
+    ])
+
+
+def keyboard_key(key_name: str):
+    allowed = {
+        "enter": "Return",
+        "backspace": "BackSpace",
+        "space": "space",
+        "escape": "Escape",
+        "tab": "Tab",
+        "ctrl_l": "ctrl+l",
+        "ctrl_a": "ctrl+a",
+        "ctrl_c": "ctrl+c",
+        "ctrl_v": "ctrl+v",
+    }
+
+    if key_name not in allowed:
+        return {
+            "ok": False,
+            "error": f"Unknown key: {key_name}",
+        }
+
+    return run_shell([
+        "xdotool",
+        "key",
+        "--clearmodifiers",
+        allowed[key_name],
+    ])
+
+
+# =========================
+# Browser / YouTube / Google
 # =========================
 
 def open_browser_url(url: str):
@@ -1340,39 +1403,54 @@ def open_browser_url(url: str):
 
     if not browser:
         with state_lock:
-            state["caption"] = "Could not find Chromium browser"
+            state["caption"] = "Could not find browser"
 
         return {
             "ok": False,
-            "error": "Could not find chromium-browser or chromium. Try: sudo apt install chromium-browser"
+            "error": "Could not find Firefox/Chromium browser",
         }
 
     with state_lock:
-        state["caption"] = "Opening browser..."
+        state["caption"] = f"Opening browser: {browser}"
 
-    launch_result = run_shell([
-        browser,
-        "--new-window",
-        "--start-maximized",
-        url
-    ])
+    if "firefox" in browser:
+        cmd = [
+            browser,
+            "--new-window",
+            url,
+        ]
+    elif browser in ["x-www-browser", "sensible-browser"]:
+        cmd = [
+            browser,
+            url,
+        ]
+    else:
+        cmd = [
+            browser,
+            "--new-window",
+            "--start-maximized",
+            url,
+        ]
 
-    time.sleep(2.0)
+    launch_result = run_shell(cmd)
 
-    focus_result = focus_chromium()
+    time.sleep(2.5)
+
+    focus_result = focus_browser()
     minimize_result = minimize_truevision()
 
-    time.sleep(0.3)
-    focus_result_2 = focus_chromium()
+    time.sleep(0.4)
+    focus_result_2 = focus_browser()
 
     return {
         "ok": True,
         "url": url,
         "browser": browser,
+        "cmd": cmd,
         "launch": launch_result,
         "focus": focus_result,
         "minimize_hud": minimize_result,
-        "focus_after_minimize": focus_result_2
+        "focus_after_minimize": focus_result_2,
     }
 
 
@@ -1382,7 +1460,7 @@ def open_youtube_search(query: str):
     if not clean:
         return {
             "ok": False,
-            "error": "Missing YouTube search query"
+            "error": "Missing YouTube search query",
         }
 
     encoded = urllib.parse.quote_plus(clean)
@@ -1402,7 +1480,7 @@ def open_youtube_music_search(query: str):
     if not clean:
         return {
             "ok": False,
-            "error": "Missing YouTube Music search query"
+            "error": "Missing YouTube Music search query",
         }
 
     encoded = urllib.parse.quote_plus(clean)
@@ -1412,6 +1490,24 @@ def open_youtube_music_search(query: str):
         state["youtube_status"] = "YouTube Music"
         state["youtube_last_query"] = clean
         state["caption"] = f"YouTube Music: {clean}"
+
+    return open_browser_url(url)
+
+
+def google_search_from_phone(query: str):
+    clean = query.strip()
+
+    if not clean:
+        return {
+            "ok": False,
+            "error": "Missing Google search query",
+        }
+
+    encoded = urllib.parse.quote_plus(clean)
+    url = f"https://www.google.com/search?q={encoded}"
+
+    with state_lock:
+        state["caption"] = f"Google search: {clean}"
 
     return open_browser_url(url)
 
@@ -1439,10 +1535,10 @@ def youtube_key(control_name: str):
     if control_name not in controls:
         return {
             "ok": False,
-            "error": f"Unknown YouTube control: {control_name}"
+            "error": f"Unknown YouTube control: {control_name}",
         }
 
-    focus_result = focus_chromium()
+    focus_result = focus_browser()
     cmd_result = run_shell(controls[control_name])
 
     with state_lock:
@@ -1452,21 +1548,26 @@ def youtube_key(control_name: str):
         "ok": cmd_result.get("ok", False),
         "focus": focus_result,
         "control": control_name,
-        "cmd_result": cmd_result
+        "cmd_result": cmd_result,
     }
 
 
 def close_youtube():
-    result = run_shell(["pkill", "-f", "chromium"])
+    result1 = run_shell(["pkill", "-f", "firefox"])
+    result2 = run_shell(["pkill", "-f", "chromium"])
 
     with state_lock:
         state["youtube_status"] = "closed"
-        state["caption"] = "YouTube closed"
+        state["caption"] = "Browser closed"
 
     time.sleep(0.5)
     focus_truevision()
 
-    return result
+    return {
+        "ok": True,
+        "firefox": result1,
+        "chromium": result2,
+    }
 
 
 def return_to_hud():
@@ -1476,7 +1577,7 @@ def return_to_hud():
         cv2.setWindowProperty(
             "TrueVision",
             cv2.WND_PROP_FULLSCREEN,
-            cv2.WINDOW_FULLSCREEN
+            cv2.WINDOW_FULLSCREEN,
         )
     except Exception:
         pass
@@ -1494,7 +1595,7 @@ def shutdown_truevision():
 
     return {
         "ok": True,
-        "status": "TrueVision shutting down"
+        "status": "TrueVision shutting down",
     }
 
 
@@ -1654,9 +1755,9 @@ def rename_face_on_dgx(old_name: str, new_name: str):
             f"{DGX_HTTP_URL}/rename_face",
             json={
                 "old_name": old_name,
-                "new_name": new_name
+                "new_name": new_name,
             },
-            timeout=10
+            timeout=10,
         )
 
         return resp.json()
@@ -1664,7 +1765,7 @@ def rename_face_on_dgx(old_name: str, new_name: str):
     except Exception as e:
         return {
             "ok": False,
-            "error": str(e)
+            "error": str(e),
         }
 
 
@@ -1673,9 +1774,9 @@ def save_unknown_face_on_dgx(name: str):
         resp = requests.post(
             f"{DGX_HTTP_URL}/save_unknown_face",
             json={
-                "name": name
+                "name": name,
             },
-            timeout=10
+            timeout=10,
         )
 
         return resp.json()
@@ -1683,7 +1784,7 @@ def save_unknown_face_on_dgx(name: str):
     except Exception as e:
         return {
             "ok": False,
-            "error": str(e)
+            "error": str(e),
         }
 
 
@@ -1692,9 +1793,9 @@ def set_language_on_dgx(language: str):
         resp = requests.post(
             f"{DGX_HTTP_URL}/set_language",
             json={
-                "language": language
+                "language": language,
             },
-            timeout=10
+            timeout=10,
         )
 
         data = resp.json()
@@ -1708,7 +1809,7 @@ def set_language_on_dgx(language: str):
     except Exception as e:
         return {
             "ok": False,
-            "error": str(e)
+            "error": str(e),
         }
 
 
@@ -1718,7 +1819,7 @@ def add_reminder(text: str):
     if not clean:
         return {
             "ok": False,
-            "error": "Missing reminder text"
+            "error": "Missing reminder text",
         }
 
     with state_lock:
@@ -1727,7 +1828,7 @@ def add_reminder(text: str):
 
     return {
         "ok": True,
-        "reminders": state["reminders"]
+        "reminders": state["reminders"],
     }
 
 
@@ -1737,7 +1838,7 @@ def clear_reminders():
 
     return {
         "ok": True,
-        "reminders": []
+        "reminders": [],
     }
 
 
@@ -1890,7 +1991,26 @@ CONTROL_HTML = """
         <button class="gray" onclick="youtubeControl('volume_down')">Volume Down</button>
 
         <button class="feature" onclick="returnToHud()">Return to HUD</button>
-        <button class="danger" onclick="closeYoutube()">Close YouTube</button>
+        <button class="danger" onclick="closeYoutube()">Close Browser</button>
+    </div>
+
+    <div class="section">
+        <h3>Pi Keyboard</h3>
+
+        <input id="keyboardText" placeholder="Type text to Pi">
+        <button class="feature" onclick="typeToPi()">Type to Active Window</button>
+
+        <button class="gray" onclick="keyboardKey('enter')">Enter</button>
+        <button class="gray" onclick="keyboardKey('backspace')">Backspace</button>
+        <button class="gray" onclick="keyboardKey('space')">Space</button>
+        <button class="gray" onclick="keyboardKey('escape')">Escape</button>
+        <button class="gray" onclick="keyboardKey('tab')">Tab</button>
+        <button class="gray" onclick="keyboardKey('ctrl_l')">Address Bar</button>
+        <button class="gray" onclick="keyboardKey('ctrl_a')">Select All</button>
+
+        <h3>Google Search</h3>
+        <input id="googleQuery" placeholder="Search Google">
+        <button class="feature" onclick="googleSearch()">Open Google Search</button>
     </div>
 
     <div class="section">
@@ -2041,6 +2161,51 @@ async function shutdownTrueVision() {
     }
 
     const res = await fetch('/shutdown', {method: 'POST'});
+    const data = await res.json();
+    document.getElementById('status').innerText = JSON.stringify(data, null, 2);
+}
+
+async function typeToPi() {
+    const text = document.getElementById('keyboardText').value;
+
+    if (!text) {
+        document.getElementById('status').innerText = 'Please enter text to type';
+        return;
+    }
+
+    const res = await fetch('/keyboard/type', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text: text})
+    });
+
+    const data = await res.json();
+    document.getElementById('status').innerText = JSON.stringify(data, null, 2);
+}
+
+async function keyboardKey(name) {
+    const res = await fetch('/keyboard/key/' + name, {
+        method: 'POST'
+    });
+
+    const data = await res.json();
+    document.getElementById('status').innerText = JSON.stringify(data, null, 2);
+}
+
+async function googleSearch() {
+    const query = document.getElementById('googleQuery').value.trim();
+
+    if (!query) {
+        document.getElementById('status').innerText = 'Please enter a Google search';
+        return;
+    }
+
+    const res = await fetch('/google/search', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({query: query})
+    });
+
     const data = await res.json();
     document.getElementById('status').innerText = JSON.stringify(data, null, 2);
 }
@@ -2212,9 +2377,7 @@ async function mouseClick(button) {
     const res = await fetch('/mouse/click', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-            button: button
-        })
+        body: JSON.stringify({button: button})
     });
 
     const data = await res.json();
@@ -2290,9 +2453,7 @@ async function saveUnknownFace() {
     const res = await fetch('/save_unknown_face', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-            name: name
-        })
+        body: JSON.stringify({name: name})
     });
 
     const data = await res.json();
@@ -2345,7 +2506,7 @@ def set_mode(mode_name: str):
     if mode_name not in MODE_FROM_NAME:
         return {
             "ok": False,
-            "error": "Unknown mode"
+            "error": "Unknown mode",
         }
 
     with state_lock:
@@ -2353,7 +2514,7 @@ def set_mode(mode_name: str):
 
     return {
         "ok": True,
-        "mode": mode_name
+        "mode": mode_name,
     }
 
 
@@ -2366,7 +2527,7 @@ def set_hud_background(background_mode: str):
         return {
             "ok": True,
             "hud_camera_background": True,
-            "mode": "camera"
+            "mode": "camera",
         }
 
     if background_mode == "black":
@@ -2376,19 +2537,18 @@ def set_hud_background(background_mode: str):
         return {
             "ok": True,
             "hud_camera_background": False,
-            "mode": "black"
+            "mode": "black",
         }
 
     return {
         "ok": False,
-        "error": "Unknown HUD background mode. Use camera or black."
+        "error": "Unknown HUD background mode. Use camera or black.",
     }
 
 
 @phone_app.post("/language/{language}")
 def set_language(language: str):
-    result = set_language_on_dgx(language)
-    return result
+    return set_language_on_dgx(language)
 
 
 @phone_app.post("/feature/{feature_name}")
@@ -2414,12 +2574,12 @@ def run_feature(feature_name: str):
     else:
         return {
             "ok": False,
-            "error": "Unknown feature"
+            "error": "Unknown feature",
         }
 
     return {
         "ok": True,
-        "feature": feature_name
+        "feature": feature_name,
     }
 
 
@@ -2443,6 +2603,23 @@ def youtube_control(control_name: str):
 @phone_app.post("/youtube/close")
 def youtube_close():
     return close_youtube()
+
+
+@phone_app.post("/google/search")
+def google_search_route(payload: Dict[str, str]):
+    query = payload.get("query", "").strip()
+    return google_search_from_phone(query)
+
+
+@phone_app.post("/keyboard/type")
+def keyboard_type_route(payload: Dict[str, str]):
+    text = payload.get("text", "")
+    return keyboard_type_text(text)
+
+
+@phone_app.post("/keyboard/key/{key_name}")
+def keyboard_key_route(key_name: str):
+    return keyboard_key(key_name)
 
 
 @phone_app.post("/return_to_hud")
@@ -2490,12 +2667,12 @@ def update_location(payload: Dict[str, float]):
     with state_lock:
         state["location"] = {
             "lat": payload["lat"],
-            "lon": payload["lon"]
+            "lon": payload["lon"],
         }
 
     return {
         "ok": True,
-        "location": state["location"]
+        "location": state["location"],
     }
 
 
@@ -2518,12 +2695,10 @@ def rename_face(payload: Dict[str, str]):
     if not old_name or not new_name:
         return {
             "ok": False,
-            "error": "Missing old_name or new_name"
+            "error": "Missing old_name or new_name",
         }
 
-    result = rename_face_on_dgx(old_name, new_name)
-
-    return result
+    return rename_face_on_dgx(old_name, new_name)
 
 
 @phone_app.post("/save_unknown_face")
@@ -2533,12 +2708,10 @@ def save_unknown_face(payload: Dict[str, str]):
     if not name:
         return {
             "ok": False,
-            "error": "Missing name"
+            "error": "Missing name",
         }
 
-    result = save_unknown_face_on_dgx(name)
-
-    return result
+    return save_unknown_face_on_dgx(name)
 
 
 @phone_app.get("/state")
@@ -2571,11 +2744,12 @@ def get_state():
 
 def phone_controller_thread():
     print("[PI] Phone controller running on port 8080")
+
     uvicorn.run(
         phone_app,
         host="0.0.0.0",
         port=8080,
-        log_level="warning"
+        log_level="warning",
     )
 
 
