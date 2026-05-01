@@ -10,7 +10,6 @@ import subprocess
 import webbrowser
 from typing import Optional, Dict, Any, List
 
-import numpy as np
 import requests
 import websocket
 from fastapi import FastAPI
@@ -87,12 +86,12 @@ state = {
     "caption": "",
     "last_original_text": "",
     "last_language": "",
+    "selected_language": "en",
     "last_task": "",
     "last_command": {},
     "summary": "",
 
     "faces": [],
-    "known_faces": {},
     "last_face_error": "",
 
     "weather": "",
@@ -279,6 +278,7 @@ def dgx_audio_thread():
                     text = data.get("text", "").strip()
                     original = data.get("original_text", "").strip()
                     language = data.get("detected_language", "")
+                    selected_language = data.get("selected_language", "")
                     task = data.get("task", "")
 
                     if text:
@@ -286,11 +286,12 @@ def dgx_audio_thread():
                             state["caption"] = text
                             state["last_original_text"] = original
                             state["last_language"] = language
+                            state["selected_language"] = selected_language
                             state["last_task"] = task
                             state["last_command"] = data.get("command", {})
 
                         print("[CAPTION]", text)
-                        print("[LANG]", language, "|", task)
+                        print("[LANG]", language, "| selected:", selected_language, "|", task)
 
         except Exception as e:
             print("[PI] Audio WebSocket failed:", e)
@@ -405,6 +406,7 @@ def draw_status(frame):
         audio_connected = state["dgx_audio_connected"]
         face_connected = state["dgx_face_connected"]
         language = state["last_language"]
+        selected_language = state["selected_language"]
         task = state["last_task"]
 
     mode_name = MODE_NAMES.get(mode, "UNKNOWN")
@@ -429,21 +431,24 @@ def draw_status(frame):
         cv2.LINE_AA
     )
 
-    if language:
-        lang_text = f"Language: {language}"
-        if task:
-            lang_text += f" | {task}"
+    lang_text = f"Selected language: {selected_language}"
 
-        cv2.putText(
-            frame,
-            lang_text,
-            (15, 70),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.58,
-            (0, 255, 255),
-            2,
-            cv2.LINE_AA
-        )
+    if language:
+        lang_text += f" | Detected: {language}"
+
+    if task:
+        lang_text += f" | {task}"
+
+    cv2.putText(
+        frame,
+        lang_text,
+        (15, 70),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.58,
+        (0, 255, 255),
+        2,
+        cv2.LINE_AA
+    )
 
     return frame
 
@@ -872,33 +877,41 @@ def rename_face_on_dgx(old_name: str, new_name: str):
 
 
 def save_unknown_face_on_dgx(name: str):
-    with state_lock:
-        faces = list(state["faces"])
-
-    pending_face_id = None
-
-    for face in faces:
-        if not face.get("known", True) and face.get("pending_face_id"):
-            pending_face_id = face["pending_face_id"]
-            break
-
-    if pending_face_id is None:
-        return {
-            "ok": False,
-            "error": "No unknown face currently visible. Stand in front of the camera first."
-        }
-
     try:
         resp = requests.post(
             f"{DGX_HTTP_URL}/save_unknown_face",
             json={
-                "pending_face_id": pending_face_id,
                 "name": name
             },
             timeout=10
         )
 
         return resp.json()
+
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e)
+        }
+
+
+def set_language_on_dgx(language: str):
+    try:
+        resp = requests.post(
+            f"{DGX_HTTP_URL}/set_language",
+            json={
+                "language": language
+            },
+            timeout=10
+        )
+
+        data = resp.json()
+
+        if data.get("ok"):
+            with state_lock:
+                state["selected_language"] = data.get("active_language", language)
+
+        return data
 
     except Exception as e:
         return {
@@ -987,6 +1000,16 @@ CONTROL_HTML = """
 
     <hr>
 
+    <h3>Audio Language</h3>
+    <button class="gray" onclick="setLanguage('en')">English Captions</button>
+    <button class="gray" onclick="setLanguage('es')">Spanish to English</button>
+    <button class="gray" onclick="setLanguage('de')">German to English</button>
+    <button class="gray" onclick="setLanguage('ar')">Arabic to English</button>
+    <button class="gray" onclick="setLanguage('hi')">Hindi to English</button>
+    <button class="gray" onclick="setLanguage('ur')">Urdu to English</button>
+
+    <hr>
+
     <button class="feature" onclick="feature('maps')">Open Maps</button>
     <button class="feature" onclick="feature('weather')">Weather</button>
     <button class="feature" onclick="feature('news')">News</button>
@@ -1020,6 +1043,12 @@ CONTROL_HTML = """
 <script>
 async function setMode(mode) {
     const res = await fetch('/mode/' + mode, {method: 'POST'});
+    const data = await res.json();
+    document.getElementById('status').innerText = JSON.stringify(data, null, 2);
+}
+
+async function setLanguage(language) {
+    const res = await fetch('/language/' + language, {method: 'POST'});
     const data = await res.json();
     document.getElementById('status').innerText = JSON.stringify(data, null, 2);
 }
@@ -1132,6 +1161,12 @@ def set_mode(mode_name: str):
     }
 
 
+@phone_app.post("/language/{language}")
+def set_language(language: str):
+    result = set_language_on_dgx(language)
+    return result
+
+
 @phone_app.post("/feature/{feature_name}")
 def run_feature(feature_name: str):
     if feature_name == "maps":
@@ -1218,6 +1253,7 @@ def get_state():
             "caption": state["caption"],
             "last_original_text": state["last_original_text"],
             "last_language": state["last_language"],
+            "selected_language": state["selected_language"],
             "last_task": state["last_task"],
             "summary": state["summary"],
             "faces": state["faces"],
