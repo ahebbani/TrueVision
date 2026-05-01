@@ -1,8 +1,6 @@
 import os
 import cv2
 import json
-import logging
-import platform
 import time
 import wave
 import queue
@@ -10,8 +8,7 @@ import serial
 import threading
 import subprocess
 import webbrowser
-from dataclasses import dataclass, field
-from datetime import datetime
+from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 import numpy as np
@@ -20,9 +17,6 @@ import websocket
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 import uvicorn
-
-
-logger = logging.getLogger(__name__)
 
 
 # =========================
@@ -51,8 +45,6 @@ JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "70"))
 
 DISPLAY_WIDTH = int(os.getenv("DISPLAY_WIDTH", "1280"))
 DISPLAY_HEIGHT = int(os.getenv("DISPLAY_HEIGHT", "720"))
-HUD_SHOW_CAMERA_BG = os.getenv("HUD_SHOW_CAMERA_BG", "0").lower() in {"1", "true", "yes", "on"}
-HUD_WINDOW_NAME = os.getenv("HUD_WINDOW_NAME", "TrueVision HUD")
 
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
@@ -106,7 +98,6 @@ state = {
     "weather": "",
     "news": "",
     "location": None,
-    "reminders": [],
 
     "dgx_audio_connected": False,
     "dgx_face_connected": False,
@@ -212,7 +203,8 @@ def uart_thread():
             mode = payload[0]
 
             if mode in MODE_NAMES:
-                set_mode_state(mode)
+                with state_lock:
+                    state["mode"] = mode
 
                 print(f"[PI] ESP32 mode: {MODE_NAMES[mode]}")
 
@@ -352,453 +344,151 @@ def dgx_face_thread():
 
 
 # =========================
-# HUD Display
+# Drawing
 # =========================
 
-@dataclass
-class Toast:
-    text: str
-    duration: float = 2.0
-    created_at: float = field(default_factory=time.time)
+def wrap_text(text: str, max_chars: int = 64) -> List[str]:
+    words = text.split()
+    lines = []
+    current = ""
 
-    @property
-    def age(self) -> float:
-        return time.time() - self.created_at
+    for word in words:
+        if len(current) + len(word) + 1 <= max_chars:
+            current += (" " if current else "") + word
+        else:
+            if current:
+                lines.append(current)
+            current = word
 
-    @property
-    def is_expired(self) -> bool:
-        return self.age > self.duration
+    if current:
+        lines.append(current)
 
-    @property
-    def alpha(self) -> float:
-        fade_time = 0.5
-        time_left = self.duration - self.age
-
-        if time_left <= 0:
-            return 0.0
-
-        if time_left >= fade_time:
-            return 1.0
-
-        return time_left / fade_time
+    return lines
 
 
-class ToastManager:
-    def __init__(self):
-        self._toasts: List[Toast] = []
-        self._lock = threading.Lock()
+def draw_caption(frame, caption: str):
+    if not caption:
+        return frame
 
-    def show(self, text: str, duration: float = 2.0):
-        clean_text = _trim_text(text, max_len=72)
+    h, w = frame.shape[:2]
 
-        if not clean_text:
-            return
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (20, h - 150), (w - 20, h - 20), (0, 0, 0), -1)
+    frame = cv2.addWeighted(overlay, 0.60, frame, 0.40, 0)
 
-        with self._lock:
-            self._toasts.append(Toast(text=clean_text, duration=duration))
+    lines = wrap_text(caption, max_chars=70)
 
-    def get_active_toasts(self) -> List[Toast]:
-        with self._lock:
-            self._toasts = [toast for toast in self._toasts if not toast.is_expired]
-            return list(self._toasts)
+    y = h - 108
 
+    for line in lines[:3]:
+        cv2.putText(
+            frame,
+            line,
+            (40, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.78,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA
+        )
+        y += 35
 
-def _trim_text(text: str, max_len: int = 56) -> str:
-    clean = " ".join((text or "").split())
-
-    if len(clean) <= max_len:
-        return clean
-
-    return clean[: max_len - 3].rstrip() + "..."
-
-
-def _mode_to_hud_name(mode: int) -> str:
-    return {
-        MODE_AUDIO: "audio",
-        MODE_FACE: "face",
-        MODE_DUAL: "both",
-    }.get(mode, "face")
+    return frame
 
 
-def _get_cpu_temp() -> Optional[float]:
-    if platform.system() != "Linux":
-        return None
+def draw_status(frame):
+    with state_lock:
+        mode = state["mode"]
+        uart_connected = state["uart_connected"]
+        audio_connected = state["dgx_audio_connected"]
+        face_connected = state["dgx_face_connected"]
+        language = state["last_language"]
 
-    try:
-        with open("/sys/class/thermal/thermal_zone0/temp", "r", encoding="utf-8") as temp_file:
-            return float(temp_file.read().strip()) / 1000.0
-    except Exception:
-        return None
+    mode_name = MODE_NAMES.get(mode, "UNKNOWN")
 
+    text = f"Mode: {mode_name} | UART: {'OK' if uart_connected else 'NO'} | Audio DGX: {'OK' if audio_connected else 'NO'} | Face DGX: {'OK' if face_connected else 'NO'}"
 
-def _get_wifi_signal() -> str:
-    if platform.system() != "Linux":
-        return "N/A"
+    cv2.rectangle(frame, (0, 0), (frame.shape[1], 42), (0, 0, 0), -1)
 
-    try:
-        output = subprocess.check_output(["iwconfig", "wlan0"], stderr=subprocess.DEVNULL).decode("utf-8")
-    except Exception:
-        return "N/A"
-
-    marker = "Signal level="
-    if marker not in output:
-        return "N/A"
-
-    signal = output.split(marker, 1)[1].split()[0].strip()
-    return f"{signal} dBm"
-
-
-def _face_box_to_display(face: Dict[str, Any], width: int, height: int) -> Optional[tuple[int, int, int, int]]:
-    box = face.get("box", [])
-    rect = face.get("rect")
-
-    if len(box) == 4:
-        left, top, right, bottom = box
-    elif rect is not None and all(hasattr(rect, attr) for attr in ("left", "top", "right", "bottom")):
-        left, top, right, bottom = rect.left(), rect.top(), rect.right(), rect.bottom()
-    else:
-        return None
-
-    source_w = max(int(face.get("frame_width", FACE_SEND_WIDTH) or FACE_SEND_WIDTH), 1)
-    source_h = max(int(face.get("frame_height", height) or height), 1)
-
-    scale_x = width / float(source_w)
-    scale_y = height / float(source_h)
-
-    left = int(left * scale_x)
-    right = int(right * scale_x)
-    top = int(top * scale_y)
-    bottom = int(bottom * scale_y)
-
-    left = max(0, min(width - 1, left))
-    right = max(left + 1, min(width - 1, right))
-    top = max(0, min(height - 1, top))
-    bottom = max(top + 1, min(height - 1, bottom))
-
-    return left, top, right, bottom
-
-
-def render_clock_date(frame, x: int = 20, y: int = 42):
-    now = datetime.now()
-    time_str = now.strftime("%I:%M %p").lstrip("0")
-    date_str = now.strftime("%a, %b %d")
-
-    cv2.putText(frame, time_str, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 2, cv2.LINE_AA)
-    cv2.putText(frame, date_str, (x, y + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 1, cv2.LINE_AA)
-
-
-def render_system_status(
-    frame,
-    mode: str,
-    uart_available: bool,
-    audio_available: bool,
-    face_available: bool,
-    width: int,
-):
-    x = width - 430
-    y = 30
-
-    temp = _get_cpu_temp()
-    temp_color = (0, 255, 0)
-    temp_text = "CPU --.-C"
-
-    if temp is not None:
-        temp_text = f"CPU {temp:.1f}C"
-        if temp > 75:
-            temp_color = (0, 0, 255)
-        elif temp > 60:
-            temp_color = (0, 255, 255)
-
-    cv2.putText(frame, temp_text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, temp_color, 1, cv2.LINE_AA)
     cv2.putText(
         frame,
-        f"WiFi {_get_wifi_signal()}",
-        (x + 130, y),
+        text,
+        (15, 28),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        (255, 255, 255),
-        1,
-        cv2.LINE_AA,
+        0.62,
+        (0, 255, 255),
+        2,
+        cv2.LINE_AA
     )
 
-    y += 25
-    server_available = audio_available or face_available
-    server_color = (0, 255, 0) if server_available else (0, 0, 255)
-    server_text = "Connected" if server_available else "Disconnected"
+    if language:
+        cv2.putText(
+            frame,
+            f"Language: {language}",
+            (15, 70),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.58,
+            (0, 255, 255),
+            2,
+            cv2.LINE_AA
+        )
 
-    cv2.circle(frame, (x + 8, y - 4), 5, server_color, -1)
-    cv2.putText(frame, f"DGX {server_text}", (x + 22, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
-
-    detail = f"A:{'OK' if audio_available else '--'} F:{'OK' if face_available else '--'} UART:{'OK' if uart_available else '--'}"
-    cv2.putText(frame, detail, (x + 155, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
-
-    y += 25
-    cv2.putText(frame, f"Mode: {mode.upper()}", (x + 22, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2, cv2.LINE_AA)
+    return frame
 
 
-def render_face_recognition(frame, faces_info: List[Dict[str, Any]], width: int, height: int):
-    for face in faces_info:
-        scaled_box = _face_box_to_display(face, width, height)
+def draw_faces(frame):
+    h, w = frame.shape[:2]
 
-        if scaled_box is None:
+    with state_lock:
+        faces = list(state["faces"])
+
+    for face in faces:
+        box = face.get("box", [])
+        source_w = face.get("frame_width", FACE_SEND_WIDTH)
+        source_h = face.get("frame_height", int(FACE_SEND_WIDTH * h / max(w, 1)))
+
+        if len(box) != 4:
             continue
 
-        left, top, right, bottom = scaled_box
-        info_x = right + 12
+        left, top, right, bottom = box
 
-        if info_x > width - 280:
-            info_x = max(12, left - 280)
+        scale_x = w / max(source_w, 1)
+        scale_y = h / max(source_h, 1)
 
-        info_y = max(top + 18, 30)
+        left = int(left * scale_x)
+        right = int(right * scale_x)
+        top = int(top * scale_y)
+        bottom = int(bottom * scale_y)
+
+        name = face.get("name", "Unknown")
+        count = face.get("seen_count", 1)
+
+        label = f"{name} | seen {count}x"
 
         cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
 
-        name = _trim_text(face.get("name", "Unknown"), max_len=28)
-        seen_count = int(face.get("seen_count") or 0)
-        label = name if seen_count <= 0 else f"{name} (seen {seen_count}x)"
-        cv2.putText(frame, label, (info_x, info_y), cv2.FONT_HERSHEY_SIMPLEX, 0.68, (255, 255, 255), 2, cv2.LINE_AA)
-
-        last_seen = face.get("last_seen_ago")
-        if last_seen:
-            cv2.putText(frame, f"Last: {last_seen}", (info_x, info_y + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
-
-        summary = _trim_text(face.get("summary", ""), max_len=48)
-        if summary:
-            cv2.putText(frame, summary, (info_x, info_y + 48), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
-
-        if face.get("is_recording"):
-            rec_x = max(left - 18, 12)
-            cv2.circle(frame, (rec_x, top + 10), 6, (0, 0, 255), -1)
-            cv2.putText(frame, "REC", (rec_x - 12, top + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1, cv2.LINE_AA)
-
-
-def render_live_captions(frame, text: str, source_language: str, width: int, height: int):
-    if not text:
-        return
-
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 0.8
-    thickness = 2
-    max_width = width - 40
-    words = text.split()
-    lines = []
-    current_line = ""
-
-    language_code = (source_language or "").strip().lower()
-    show_language_tag = language_code and language_code not in {"en", "eng", "english"}
-
-    if show_language_tag:
-        lang_map = {
-            "es": "Spanish",
-            "de": "German",
-            "fr": "French",
-            "it": "Italian",
-            "hi": "Hindi",
-            "zh": "Chinese",
-        }
-        current_line = f"({lang_map.get(language_code, language_code.upper())}) "
-
-    for word in words:
-        test_line = current_line + word + " "
-        (text_width, _), _ = cv2.getTextSize(test_line, font, scale, thickness)
-
-        if text_width > max_width and current_line:
-            lines.append(current_line.strip())
-            current_line = word + " "
-        else:
-            current_line = test_line
-
-    if current_line:
-        lines.append(current_line.strip())
-
-    lines_to_show = lines[-2:]
-    bg_height = len(lines_to_show) * 35 + 20
-    y_start = height - bg_height
-
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (0, y_start), (width, height), (30, 30, 30), -1)
-    cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
-
-    y = y_start + 30
-
-    for line in lines_to_show:
-        if line.startswith("(") and show_language_tag:
-            end_idx = line.find(")") + 1
-            prefix = line[:end_idx]
-            remainder = line[end_idx:]
-
-            cv2.putText(frame, prefix, (20, y), font, scale, (0, 255, 255), thickness, cv2.LINE_AA)
-            (prefix_width, _), _ = cv2.getTextSize(prefix, font, scale, thickness)
-            cv2.putText(frame, remainder, (20 + prefix_width, y), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
-        else:
-            cv2.putText(frame, line, (20, y), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
-
-        y += 35
-
-
-def render_reminders(frame, reminders: List[str], height: int):
-    if not reminders:
-        return
-
-    y = height - 120
-
-    for text in reminders[:3]:
-        cv2.circle(frame, (25, y - 5), 4, (0, 200, 255), -1)
-        cv2.putText(frame, _trim_text(text, max_len=46), (40, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
-        y -= 25
-
-
-def render_toasts(frame, toast_manager: ToastManager, width: int, height: int):
-    active_toasts = toast_manager.get_active_toasts()
-
-    if not active_toasts:
-        return
-
-    y = height // 2
-
-    for toast in active_toasts:
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        scale = 0.8
-        thickness = 2
-        (text_width, _), _ = cv2.getTextSize(toast.text, font, scale, thickness)
-        x = (width - text_width) // 2
-
-        alpha = toast.alpha
-        value = int(255 * alpha)
-
-        if alpha > 0.05:
-            cv2.putText(frame, toast.text, (x, y), font, scale, (value, value, value), thickness, cv2.LINE_AA)
-            y += 40
-
-
-class DisplayManager:
-    def __init__(self, resolution=(1280, 720)):
-        self.width, self.height = resolution
-        self.window_name = HUD_WINDOW_NAME
-        self.toast_manager = ToastManager()
-        self.pending_action: Optional[str] = None
-        self.is_running = False
-
-    def start(self):
-        if self.is_running:
-            return
-
-        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
-
-        try:
-            cv2.setWindowProperty(self.window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-        except Exception:
-            pass
-
-        self.is_running = True
-        logger.info("HUD display started")
-
-    def stop(self):
-        if not self.is_running:
-            return
-
-        self.is_running = False
-
-        try:
-            cv2.destroyWindow(self.window_name)
-        except Exception:
-            cv2.destroyAllWindows()
-
-        logger.info("HUD display stopped")
-
-    def render_frame(
-        self,
-        mode: str,
-        uart_available: bool,
-        audio_available: bool,
-        face_available: bool,
-        faces_info: List[Dict[str, Any]],
-        caption_text: str,
-        source_language: str,
-        reminders: List[str],
-        bg_frame: Optional[np.ndarray] = None,
-    ) -> tuple[bool, Optional[str]]:
-        if not self.is_running:
-            return False, None
-
-        if bg_frame is not None:
-            frame = cv2.resize(bg_frame, (self.width, self.height))
-        else:
-            frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-
-        render_clock_date(frame)
-        render_system_status(frame, mode, uart_available, audio_available, face_available, self.width)
-        render_reminders(frame, reminders, self.height)
-        render_toasts(frame, self.toast_manager, self.width, self.height)
-
-        if mode in ("face", "both"):
-            render_face_recognition(frame, faces_info, self.width, self.height)
-
-        if mode in ("audio", "both"):
-            render_live_captions(frame, caption_text, source_language, self.width, self.height)
-
-        cv2.imshow(self.window_name, frame)
-
-        key = cv2.waitKey(1) & 0xFF
-        self.pending_action = None
-
-        if key == ord("q"):
-            return False, None
-
-        if key == ord("a"):
-            return True, "audio"
-
-        if key == ord("f"):
-            return True, "face"
-
-        if key in (ord("b"), ord("d")):
-            return True, "dual"
-
-        if key == ord("m"):
-            self.pending_action = "maps"
-
-        elif key == ord("s"):
-            self.pending_action = "summary"
-
-        return True, None
-
-    def consume_action(self) -> Optional[str]:
-        action = self.pending_action
-        self.pending_action = None
-        return action
-
-    def show_toast(self, text: str, duration: float = 2.0):
-        self.toast_manager.show(text, duration)
-
-
-display_manager = DisplayManager((DISPLAY_WIDTH, DISPLAY_HEIGHT))
-
-
-def add_reminder(text: str):
-    clean = _trim_text(text, max_len=56)
-
-    if not clean:
-        return
-
-    with state_lock:
-        reminders = [item for item in state["reminders"] if item != clean]
-        reminders.insert(0, clean)
-        state["reminders"] = reminders[:3]
-
-
-def show_hud_toast(text: str, duration: float = 2.0):
-    display_manager.show_toast(text, duration)
-
-
-def set_mode_state(mode: int, toast: bool = True):
-    if mode not in MODE_NAMES:
-        return
-
-    with state_lock:
-        state["mode"] = mode
-
-    if toast:
-        show_hud_toast(f"{MODE_NAMES[mode].title()} mode", duration=1.5)
+        label_y = max(top - 10, 30)
+
+        cv2.rectangle(
+            frame,
+            (left, label_y - 26),
+            (left + min(360, len(label) * 13), label_y + 6),
+            (0, 255, 0),
+            -1
+        )
+
+        cv2.putText(
+            frame,
+            label,
+            (left + 6, label_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.62,
+            (0, 0, 0),
+            2,
+            cv2.LINE_AA
+        )
+
+    return frame
 
 
 # =========================
@@ -941,61 +631,59 @@ def camera_display_thread():
         print("[PI] Could not start camera:", e)
         return
 
-    display_manager.start()
     last_face_send = 0
 
     while state["running"]:
-        ret, camera_frame = cap.read()
+        ret, frame = cap.read()
 
-        if not ret or camera_frame is None:
+        if not ret or frame is None:
             print("[PI] Camera frame failed")
             time.sleep(0.05)
             continue
 
-        camera_frame = cv2.resize(camera_frame, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
+        frame = cv2.resize(frame, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
 
         with state_lock:
             mode = state["mode"]
             caption = state["caption"]
-            language = state["last_language"]
-            faces = list(state["faces"])
-            reminders = list(state["reminders"])
-            uart_connected = state["uart_connected"]
-            audio_connected = state["dgx_audio_connected"]
-            face_connected = state["dgx_face_connected"]
 
-        last_face_send = maybe_send_frame_to_dgx(camera_frame, last_face_send)
+        last_face_send = maybe_send_frame_to_dgx(frame, last_face_send)
 
-        keep_running, new_mode = display_manager.render_frame(
-            mode=_mode_to_hud_name(mode),
-            uart_available=uart_connected,
-            audio_available=audio_connected,
-            face_available=face_connected,
-            faces_info=faces,
-            caption_text=caption,
-            source_language=language,
-            reminders=reminders,
-            bg_frame=camera_frame if HUD_SHOW_CAMERA_BG else None,
-        )
+        if mode in [MODE_FACE, MODE_DUAL]:
+            frame = draw_faces(frame)
 
-        if not keep_running:
-            with state_lock:
-                state["running"] = False
+        if mode in [MODE_AUDIO, MODE_DUAL]:
+            frame = draw_caption(frame, caption)
+
+        frame = draw_status(frame)
+
+        cv2.imshow("TrueVision", frame)
+
+        key = cv2.waitKey(1) & 0xFF
+
+        if key == ord("q"):
+            state["running"] = False
             break
 
-        if new_mode in MODE_FROM_NAME:
-            set_mode_state(MODE_FROM_NAME[new_mode])
+        elif key == ord("a"):
+            with state_lock:
+                state["mode"] = MODE_AUDIO
 
-        action = display_manager.consume_action()
+        elif key == ord("f"):
+            with state_lock:
+                state["mode"] = MODE_FACE
 
-        if action == "maps":
+        elif key == ord("d"):
+            with state_lock:
+                state["mode"] = MODE_DUAL
+
+        elif key == ord("m"):
             threading.Thread(target=open_maps, daemon=True).start()
 
-        elif action == "summary":
+        elif key == ord("s"):
             threading.Thread(target=fetch_summary, daemon=True).start()
 
     cap.release()
-    display_manager.stop()
     cv2.destroyAllWindows()
 
 
@@ -1048,8 +736,6 @@ def fetch_weather():
         with state_lock:
             state["weather"] = msg
             state["caption"] = msg
-        add_reminder("Weather unavailable")
-        show_hud_toast("Weather unavailable", duration=1.5)
         return
 
     with state_lock:
@@ -1078,9 +764,6 @@ def fetch_weather():
             state["weather"] = msg
             state["caption"] = msg
 
-        add_reminder(msg)
-        show_hud_toast("Weather updated", duration=1.5)
-
         print("[PI]", msg)
 
     except Exception as e:
@@ -1088,9 +771,6 @@ def fetch_weather():
 
         with state_lock:
             state["caption"] = msg
-
-        add_reminder("Weather fetch failed")
-        show_hud_toast("Weather failed", duration=1.5)
 
         print("[PI]", msg)
 
@@ -1102,9 +782,6 @@ def fetch_news():
         with state_lock:
             state["news"] = msg
             state["caption"] = msg
-
-        add_reminder("News unavailable")
-        show_hud_toast("News unavailable", duration=1.5)
 
         return
 
@@ -1124,9 +801,6 @@ def fetch_news():
             state["news"] = msg
             state["caption"] = msg
 
-        add_reminder("Headlines updated")
-        show_hud_toast("News updated", duration=1.5)
-
         print("[PI]", msg)
 
     except Exception as e:
@@ -1134,9 +808,6 @@ def fetch_news():
 
         with state_lock:
             state["caption"] = msg
-
-        add_reminder("News fetch failed")
-        show_hud_toast("News failed", duration=1.5)
 
         print("[PI]", msg)
 
@@ -1152,9 +823,6 @@ def fetch_summary():
             state["summary"] = summary
             state["caption"] = "Summary: " + summary
 
-        add_reminder("Conversation summary ready")
-        show_hud_toast("Summary ready", duration=1.5)
-
         print("[SUMMARY]", summary)
 
     except Exception as e:
@@ -1162,9 +830,6 @@ def fetch_summary():
 
         with state_lock:
             state["caption"] = msg
-
-        add_reminder("Summary failed")
-        show_hud_toast("Summary failed", duration=1.5)
 
         print("[PI]", msg)
 
@@ -1379,7 +1044,8 @@ def set_mode(mode_name: str):
             "error": "Unknown mode"
         }
 
-    set_mode_state(MODE_FROM_NAME[mode_name])
+    with state_lock:
+        state["mode"] = MODE_FROM_NAME[mode_name]
 
     return {
         "ok": True,
@@ -1391,27 +1057,21 @@ def set_mode(mode_name: str):
 def run_feature(feature_name: str):
     if feature_name == "maps":
         threading.Thread(target=open_maps, daemon=True).start()
-        show_hud_toast("Opening maps", duration=1.5)
 
     elif feature_name == "weather":
         threading.Thread(target=fetch_weather, daemon=True).start()
-        show_hud_toast("Checking weather", duration=1.5)
 
     elif feature_name == "news":
         threading.Thread(target=fetch_news, daemon=True).start()
-        show_hud_toast("Fetching headlines", duration=1.5)
 
     elif feature_name == "summary":
         threading.Thread(target=fetch_summary, daemon=True).start()
-        show_hud_toast("Building summary", duration=1.5)
 
     elif feature_name == "music":
         threading.Thread(target=open_music, daemon=True).start()
-        show_hud_toast("Opening music", duration=1.5)
 
     elif feature_name == "call":
         threading.Thread(target=open_video_call, daemon=True).start()
-        show_hud_toast("Opening video call", duration=1.5)
 
     else:
         return {
@@ -1433,9 +1093,6 @@ def update_location(payload: Dict[str, float]):
             "lon": payload["lon"]
         }
 
-    add_reminder("Phone location synced")
-    show_hud_toast("Location updated", duration=1.5)
-
     return {
         "ok": True,
         "location": state["location"]
@@ -1455,12 +1112,6 @@ def rename_face(payload: Dict[str, str]):
 
     result = rename_face_on_dgx(old_name, new_name)
 
-    if result.get("ok"):
-        add_reminder(f"Renamed {old_name} to {new_name}")
-        show_hud_toast(f"Renamed {old_name}", duration=1.5)
-    else:
-        show_hud_toast("Rename failed", duration=1.5)
-
     return result
 
 
@@ -1478,7 +1129,6 @@ def get_state():
             "weather": state["weather"],
             "news": state["news"],
             "location": state["location"],
-            "reminders": state["reminders"],
             "uart_connected": state["uart_connected"],
             "dgx_audio_connected": state["dgx_audio_connected"],
             "dgx_face_connected": state["dgx_face_connected"],
