@@ -7,7 +7,6 @@ import queue
 import serial
 import threading
 import subprocess
-import webbrowser
 import urllib.parse
 from datetime import datetime
 from typing import Optional, Dict, Any, List
@@ -1261,12 +1260,38 @@ def focus_truevision():
     window_ids = result["stdout"].strip().splitlines()
     target = window_ids[-1]
 
-    return run_shell([
+    map_result = run_shell([
+        "xdotool",
+        "windowmap",
+        target,
+    ])
+
+    time.sleep(0.15)
+
+    raise_result = run_shell([
+        "xdotool",
+        "windowraise",
+        target,
+    ])
+
+    time.sleep(0.15)
+
+    activate_result = run_shell([
         "xdotool",
         "windowactivate",
         "--sync",
         target,
     ])
+
+    time.sleep(0.15)
+
+    return {
+        "ok": True,
+        "target": target,
+        "map": map_result,
+        "raise": raise_result,
+        "activate": activate_result,
+    }
 
 
 def minimize_truevision():
@@ -1558,20 +1583,24 @@ def close_youtube():
 
     with state_lock:
         state["youtube_status"] = "closed"
-        state["caption"] = "Browser closed"
+        state["caption"] = "Browser closed. Returning to HUD."
 
-    time.sleep(0.5)
-    focus_truevision()
+    time.sleep(0.8)
+
+    hud_result = return_to_hud()
 
     return {
         "ok": True,
         "firefox": result1,
         "chromium": result2,
+        "return_to_hud": hud_result,
     }
 
 
 def return_to_hud():
     result = focus_truevision()
+
+    time.sleep(0.25)
 
     try:
         cv2.setWindowProperty(
@@ -1579,14 +1608,18 @@ def return_to_hud():
             cv2.WND_PROP_FULLSCREEN,
             cv2.WINDOW_FULLSCREEN,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        print("[PI] Could not force fullscreen on return:", e)
 
     with state_lock:
         state["youtube_status"] = "HUD"
         state["caption"] = "Returned to TrueVision HUD"
 
-    return result
+    return {
+        "ok": True,
+        "focus": result,
+        "status": "Returned to TrueVision HUD",
+    }
 
 
 def shutdown_truevision():
@@ -1990,7 +2023,7 @@ CONTROL_HTML = """
         <button class="gray" onclick="youtubeControl('volume_up')">Volume Up</button>
         <button class="gray" onclick="youtubeControl('volume_down')">Volume Down</button>
 
-        <button class="feature" onclick="returnToHud()">Return to HUD</button>
+        <button class="feature" onclick="returnToHud()">Force Return to HUD</button>
         <button class="danger" onclick="closeYoutube()">Close Browser</button>
     </div>
 
