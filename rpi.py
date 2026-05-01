@@ -1200,6 +1200,57 @@ def focus_truevision():
 
 
 # =========================
+# Mouse / Phone Trackpad
+# =========================
+
+def mouse_move(dx: int, dy: int):
+    dx = max(-200, min(200, int(dx)))
+    dy = max(-200, min(200, int(dy)))
+
+    return run_shell([
+        "xdotool",
+        "mousemove_relative",
+        "--",
+        str(dx),
+        str(dy)
+    ])
+
+
+def mouse_click(button: int = 1):
+    button = int(button)
+
+    if button not in [1, 2, 3]:
+        button = 1
+
+    return run_shell([
+        "xdotool",
+        "click",
+        str(button)
+    ])
+
+
+def mouse_scroll(direction: str):
+    if direction == "up":
+        return run_shell(["xdotool", "click", "4"])
+
+    if direction == "down":
+        return run_shell(["xdotool", "click", "5"])
+
+    return {
+        "ok": False,
+        "error": "Unknown scroll direction"
+    }
+
+
+def mouse_drag_start():
+    return run_shell(["xdotool", "mousedown", "1"])
+
+
+def mouse_drag_end():
+    return run_shell(["xdotool", "mouseup", "1"])
+
+
+# =========================
 # YouTube / Browser Controls
 # =========================
 
@@ -1661,6 +1712,22 @@ CONTROL_HTML = """
             margin-top: 18px;
             padding-top: 14px;
         }
+
+        #trackpad {
+            width: 94%;
+            height: 280px;
+            margin: 10px auto;
+            background: #020617;
+            border: 2px solid #475569;
+            border-radius: 18px;
+            touch-action: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #94a3b8;
+            font-size: 18px;
+            user-select: none;
+        }
     </style>
 </head>
 
@@ -1713,6 +1780,16 @@ CONTROL_HTML = """
     </div>
 
     <div class="section">
+        <h3>Phone Trackpad</h3>
+        <div id="trackpad">Move finger here<br>Tap = left click</div>
+
+        <button class="gray" onclick="mouseClick(1)">Left Click</button>
+        <button class="gray" onclick="mouseClick(3)">Right Click</button>
+        <button class="gray" onclick="mouseScroll('up')">Scroll Up</button>
+        <button class="gray" onclick="mouseScroll('down')">Scroll Down</button>
+    </div>
+
+    <div class="section">
         <h3>Features</h3>
         <button class="feature" onclick="feature('maps')">Open Maps</button>
         <button class="feature" onclick="feature('weather')">Weather</button>
@@ -1754,6 +1831,11 @@ CONTROL_HTML = """
     <pre id="status">Ready</pre>
 
 <script>
+let lastTouchX = null;
+let lastTouchY = null;
+let lastMoveSent = 0;
+let didMove = false;
+
 async function setMode(mode) {
     const res = await fetch('/mode/' + mode, {method: 'POST'});
     const data = await res.json();
@@ -1842,6 +1924,108 @@ async function shutdownTrueVision() {
     const res = await fetch('/shutdown', {method: 'POST'});
     const data = await res.json();
     document.getElementById('status').innerText = JSON.stringify(data, null, 2);
+}
+
+async function mouseMove(dx, dy) {
+    await fetch('/mouse/move', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            dx: dx,
+            dy: dy
+        })
+    });
+}
+
+async function mouseClick(button) {
+    const res = await fetch('/mouse/click', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            button: button
+        })
+    });
+
+    const data = await res.json();
+    document.getElementById('status').innerText = JSON.stringify(data, null, 2);
+}
+
+async function mouseScroll(direction) {
+    const res = await fetch('/mouse/scroll/' + direction, {
+        method: 'POST'
+    });
+
+    const data = await res.json();
+    document.getElementById('status').innerText = JSON.stringify(data, null, 2);
+}
+
+function setupTrackpad() {
+    const pad = document.getElementById('trackpad');
+
+    if (!pad) {
+        return;
+    }
+
+    pad.addEventListener('touchstart', function(e) {
+        e.preventDefault();
+
+        didMove = false;
+
+        if (e.touches.length === 1) {
+            lastTouchX = e.touches[0].clientX;
+            lastTouchY = e.touches[0].clientY;
+        }
+    }, {passive: false});
+
+    pad.addEventListener('touchmove', async function(e) {
+        e.preventDefault();
+
+        if (e.touches.length !== 1) {
+            return;
+        }
+
+        const now = Date.now();
+
+        if (now - lastMoveSent < 25) {
+            return;
+        }
+
+        const x = e.touches[0].clientX;
+        const y = e.touches[0].clientY;
+
+        if (lastTouchX === null || lastTouchY === null) {
+            lastTouchX = x;
+            lastTouchY = y;
+            return;
+        }
+
+        let dx = x - lastTouchX;
+        let dy = y - lastTouchY;
+
+        if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+            didMove = true;
+        }
+
+        lastTouchX = x;
+        lastTouchY = y;
+        lastMoveSent = now;
+
+        dx = Math.round(dx * 1.8);
+        dy = Math.round(dy * 1.8);
+
+        await mouseMove(dx, dy);
+    }, {passive: false});
+
+    pad.addEventListener('touchend', async function(e) {
+        e.preventDefault();
+
+        lastTouchX = null;
+        lastTouchY = null;
+
+        if (!didMove) {
+            await mouseClick(1);
+        }
+    }, {passive: false});
 }
 
 function sendLocation() {
@@ -1941,6 +2125,7 @@ async function refreshState() {
     document.getElementById('status').innerText = JSON.stringify(data, null, 2);
 }
 
+window.addEventListener('load', setupTrackpad);
 setInterval(refreshState, 4000);
 </script>
 </body>
@@ -2066,6 +2251,36 @@ def return_to_hud_route():
 @phone_app.post("/shutdown")
 def shutdown_route():
     return shutdown_truevision()
+
+
+@phone_app.post("/mouse/move")
+def mouse_move_route(payload: Dict[str, int]):
+    dx = payload.get("dx", 0)
+    dy = payload.get("dy", 0)
+
+    return mouse_move(dx, dy)
+
+
+@phone_app.post("/mouse/click")
+def mouse_click_route(payload: Dict[str, int]):
+    button = payload.get("button", 1)
+
+    return mouse_click(button)
+
+
+@phone_app.post("/mouse/scroll/{direction}")
+def mouse_scroll_route(direction: str):
+    return mouse_scroll(direction)
+
+
+@phone_app.post("/mouse/drag_start")
+def mouse_drag_start_route():
+    return mouse_drag_start()
+
+
+@phone_app.post("/mouse/drag_end")
+def mouse_drag_end_route():
+    return mouse_drag_end()
 
 
 @phone_app.post("/location")
