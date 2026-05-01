@@ -8,6 +8,7 @@ import serial
 import threading
 import subprocess
 import webbrowser
+import urllib.parse
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 
@@ -100,12 +101,13 @@ state = {
     "news": "",
     "location": None,
 
-    # True = show camera behind HUD
-    # False = black background HUD
     "hud_camera_background": True,
 
     "reminders": [],
     "telegram_notifications": [],
+
+    "youtube_status": "",
+    "youtube_last_query": "",
 
     "dgx_audio_connected": False,
     "dgx_face_connected": False,
@@ -131,14 +133,6 @@ class UARTPacketReader:
         )
 
     def read_packet(self) -> Optional[Dict[str, Any]]:
-        """
-        ESP32 packet format:
-            AA 55 TYPE LEN_LOW LEN_HIGH PAYLOAD CHECKSUM
-
-        CHECKSUM:
-            sum(payload bytes) & 0xFF
-        """
-
         while True:
             b = self.ser.read(1)
 
@@ -368,10 +362,6 @@ def dgx_face_thread():
 # =========================
 
 def telegram_notifications_thread():
-    """
-    Poll DGX for incoming Telegram messages and show them on HUD.
-    """
-
     while state["running"]:
         try:
             resp = requests.get(
@@ -512,6 +502,7 @@ def hud_draw_system_status(frame):
         selected_language = state["selected_language"]
         last_language = state["last_language"]
         hud_camera_background = state["hud_camera_background"]
+        youtube_status = state["youtube_status"]
 
     mode_name = MODE_NAMES.get(mode, "UNKNOWN")
     server_available = audio_connected and face_connected
@@ -615,6 +606,19 @@ def hud_draw_system_status(frame):
         cv2.LINE_AA
     )
 
+    if youtube_status:
+        y += 17
+        cv2.putText(
+            frame,
+            f"YT: {youtube_status[:22]}",
+            (x + 16, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.34,
+            (255, 180, 180),
+            1,
+            cv2.LINE_AA
+        )
+
 
 def hud_draw_info_cards(frame):
     h, w = frame.shape[:2]
@@ -625,12 +629,12 @@ def hud_draw_info_cards(frame):
         summary = state["summary"]
         reminders = list(state["reminders"])
         telegram_notifications = list(state["telegram_notifications"])
+        youtube_last_query = state["youtube_last_query"]
 
     y = 80
 
     cards = []
 
-    # Telegram notifications get priority.
     for msg in telegram_notifications[-3:][::-1]:
         sender = msg.get("sender", "Telegram")
         text = msg.get("text", "")
@@ -640,6 +644,9 @@ def hud_draw_info_cards(frame):
             "TELEGRAM",
             f"{sender}: {text[:55]} ({msg_time})"
         ))
+
+    if youtube_last_query:
+        cards.append(("YOUTUBE", f"Last search: {youtube_last_query[:55]}"))
 
     if weather:
         cards.append(("WEATHER", weather))
@@ -874,12 +881,6 @@ def hud_draw_captions(frame):
 
 
 def render_hud_frame(camera_frame):
-    """
-    Render HUD on either:
-      1. camera frame background
-      2. black background
-    """
-
     with state_lock:
         mode = state["mode"]
         use_camera_background = state["hud_camera_background"]
@@ -1042,8 +1043,6 @@ def camera_display_thread():
 
     last_face_send = 0
 
-    # Fullscreen output for AR optic.
-    # The HUD frame itself is rendered at 640x480.
     cv2.namedWindow("TrueVision", cv2.WINDOW_NORMAL)
     cv2.moveWindow("TrueVision", 0, 0)
 
@@ -1066,8 +1065,6 @@ def camera_display_thread():
 
         camera_frame = cv2.resize(frame, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
 
-        # Always send real camera frame to DGX for recognition,
-        # even if display is black HUD mode.
         last_face_send = maybe_send_frame_to_dgx(camera_frame, last_face_send)
 
         hud_frame = render_hud_frame(camera_frame)
@@ -1107,6 +1104,246 @@ def camera_display_thread():
 
 
 # =========================
+# Shell / Window Helpers
+# =========================
+
+def run_shell(cmd: List[str]):
+    try:
+        subprocess.Popen(cmd)
+        return {
+            "ok": True,
+            "cmd": cmd
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "cmd": cmd
+        }
+
+
+def run_shell_wait(cmd: List[str], timeout: int = 5):
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+
+        return {
+            "ok": result.returncode == 0,
+            "cmd": cmd,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "returncode": result.returncode
+        }
+
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e),
+            "cmd": cmd
+        }
+
+
+def focus_window_by_class(window_class: str):
+    result = run_shell_wait(
+        ["xdotool", "search", "--class", window_class],
+        timeout=3
+    )
+
+    if not result.get("ok") or not result.get("stdout", "").strip():
+        return {
+            "ok": False,
+            "error": f"No window found for class {window_class}",
+            "details": result
+        }
+
+    window_ids = result["stdout"].strip().splitlines()
+    target = window_ids[-1]
+
+    return run_shell(["xdotool", "windowactivate", target])
+
+
+def focus_chromium():
+    result = focus_window_by_class("chromium")
+
+    if result.get("ok"):
+        return result
+
+    result = focus_window_by_class("Chromium")
+
+    if result.get("ok"):
+        return result
+
+    return focus_window_by_class("chrome")
+
+
+def focus_truevision():
+    result = run_shell_wait(
+        ["xdotool", "search", "--name", "TrueVision"],
+        timeout=3
+    )
+
+    if not result.get("ok") or not result.get("stdout", "").strip():
+        return {
+            "ok": False,
+            "error": "TrueVision HUD window not found",
+            "details": result
+        }
+
+    window_ids = result["stdout"].strip().splitlines()
+    target = window_ids[-1]
+
+    return run_shell(["xdotool", "windowactivate", target])
+
+
+# =========================
+# YouTube / Browser Controls
+# =========================
+
+def open_browser_url(url: str):
+    try:
+        subprocess.Popen([
+            "chromium-browser",
+            "--new-window",
+            url
+        ])
+
+        time.sleep(1.0)
+        focus_chromium()
+
+        return {
+            "ok": True,
+            "url": url
+        }
+
+    except Exception as e:
+        webbrowser.open(url)
+
+        return {
+            "ok": True,
+            "url": url,
+            "fallback": str(e)
+        }
+
+
+def open_youtube_search(query: str):
+    clean = query.strip()
+
+    if not clean:
+        return {
+            "ok": False,
+            "error": "Missing YouTube search query"
+        }
+
+    encoded = urllib.parse.quote_plus(clean)
+    url = f"https://www.youtube.com/results?search_query={encoded}"
+
+    with state_lock:
+        state["youtube_status"] = "YouTube search"
+        state["youtube_last_query"] = clean
+        state["caption"] = f"YouTube search: {clean}"
+
+    return open_browser_url(url)
+
+
+def open_youtube_music_search(query: str):
+    clean = query.strip()
+
+    if not clean:
+        return {
+            "ok": False,
+            "error": "Missing YouTube Music search query"
+        }
+
+    encoded = urllib.parse.quote_plus(clean)
+    url = f"https://music.youtube.com/search?q={encoded}"
+
+    with state_lock:
+        state["youtube_status"] = "YouTube Music"
+        state["youtube_last_query"] = clean
+        state["caption"] = f"YouTube Music: {clean}"
+
+    return open_browser_url(url)
+
+
+def youtube_key(control_name: str):
+    controls = {
+        "play_pause": ["xdotool", "key", "space"],
+        "youtube_play_pause": ["xdotool", "key", "k"],
+        "select": ["xdotool", "key", "Return"],
+        "tab": ["xdotool", "key", "Tab"],
+        "shift_tab": ["xdotool", "key", "shift+Tab"],
+        "up": ["xdotool", "key", "Up"],
+        "down": ["xdotool", "key", "Down"],
+        "left": ["xdotool", "key", "Left"],
+        "right": ["xdotool", "key", "Right"],
+        "rewind": ["xdotool", "key", "j"],
+        "forward": ["xdotool", "key", "l"],
+        "mute": ["xdotool", "key", "m"],
+        "fullscreen": ["xdotool", "key", "f"],
+        "escape": ["xdotool", "key", "Escape"],
+        "volume_up": ["xdotool", "key", "XF86AudioRaiseVolume"],
+        "volume_down": ["xdotool", "key", "XF86AudioLowerVolume"],
+    }
+
+    if control_name not in controls:
+        return {
+            "ok": False,
+            "error": f"Unknown YouTube control: {control_name}"
+        }
+
+    focus_result = focus_chromium()
+
+    cmd_result = run_shell(controls[control_name])
+
+    with state_lock:
+        state["youtube_status"] = control_name
+
+    return {
+        "ok": cmd_result.get("ok", False),
+        "focus": focus_result,
+        "control": control_name,
+        "cmd_result": cmd_result
+    }
+
+
+def close_youtube():
+    result = run_shell(["pkill", "-f", "chromium"])
+
+    with state_lock:
+        state["youtube_status"] = "closed"
+        state["caption"] = "YouTube closed"
+
+    time.sleep(0.5)
+    focus_truevision()
+
+    return result
+
+
+def return_to_hud():
+    result = focus_truevision()
+
+    with state_lock:
+        state["youtube_status"] = "HUD"
+        state["caption"] = "Returned to TrueVision HUD"
+
+    return result
+
+
+def shutdown_truevision():
+    with state_lock:
+        state["running"] = False
+
+    return {
+        "ok": True,
+        "status": "TrueVision shutting down"
+    }
+
+
+# =========================
 # Extra Features
 # =========================
 
@@ -1121,10 +1358,10 @@ def open_maps():
 
     print("[PI] Opening maps:", url)
 
-    try:
-        subprocess.Popen(["chromium-browser", "--new-window", url])
-    except Exception:
-        webbrowser.open(url)
+    with state_lock:
+        state["caption"] = "Opening Google Maps"
+
+    return open_browser_url(url)
 
 
 def open_music():
@@ -1132,10 +1369,11 @@ def open_music():
 
     print("[PI] Opening music")
 
-    try:
-        subprocess.Popen(["chromium-browser", "--new-window", url])
-    except Exception:
-        webbrowser.open(url)
+    with state_lock:
+        state["youtube_status"] = "YouTube Music"
+        state["caption"] = "Opening YouTube Music"
+
+    return open_browser_url(url)
 
 
 def open_video_call():
@@ -1143,10 +1381,10 @@ def open_video_call():
 
     print("[PI] Opening video call page")
 
-    try:
-        subprocess.Popen(["chromium-browser", "--new-window", url])
-    except Exception:
-        webbrowser.open(url)
+    with state_lock:
+        state["caption"] = "Opening Google Meet"
+
+    return open_browser_url(url)
 
 
 def fetch_weather():
@@ -1406,6 +1644,8 @@ CONTROL_HTML = """
         .feature { background: #f59e0b; color: black; }
         .danger { background: #dc2626; color: white; }
         .gray { background: #475569; color: white; }
+        .yt { background: #ef4444; color: white; }
+        .nav { background: #0ea5e9; color: white; }
 
         pre {
             text-align: left;
@@ -1414,6 +1654,12 @@ CONTROL_HTML = """
             border-radius: 12px;
             overflow-x: auto;
             white-space: pre-wrap;
+        }
+
+        .section {
+            border-top: 1px solid #334155;
+            margin-top: 18px;
+            padding-top: 14px;
         }
     </style>
 </head>
@@ -1426,58 +1672,84 @@ CONTROL_HTML = """
     <button class="face" onclick="setMode('face')">Face Mode</button>
     <button class="dual" onclick="setMode('dual')">Dual Mode</button>
 
-    <hr>
+    <div class="section">
+        <h3>HUD Background</h3>
+        <button class="gray" onclick="setHudBackground('camera')">Camera Background</button>
+        <button class="gray" onclick="setHudBackground('black')">Black HUD Background</button>
+    </div>
 
-    <h3>HUD Background</h3>
-    <button class="gray" onclick="setHudBackground('camera')">Camera Background</button>
-    <button class="gray" onclick="setHudBackground('black')">Black HUD Background</button>
+    <div class="section">
+        <h3>Audio Language</h3>
+        <button class="gray" onclick="setLanguage('en')">English Captions</button>
+        <button class="gray" onclick="setLanguage('es')">Spanish to English</button>
+        <button class="gray" onclick="setLanguage('de')">German to English</button>
+        <button class="gray" onclick="setLanguage('ar')">Arabic to English</button>
+        <button class="gray" onclick="setLanguage('hi')">Hindi to English</button>
+        <button class="gray" onclick="setLanguage('ur')">Urdu to English</button>
+    </div>
 
-    <hr>
+    <div class="section">
+        <h3>YouTube Remote</h3>
+        <input id="youtubeQuery" placeholder="Search YouTube, example lo-fi music">
 
-    <h3>Audio Language</h3>
-    <button class="gray" onclick="setLanguage('en')">English Captions</button>
-    <button class="gray" onclick="setLanguage('es')">Spanish to English</button>
-    <button class="gray" onclick="setLanguage('de')">German to English</button>
-    <button class="gray" onclick="setLanguage('ar')">Arabic to English</button>
-    <button class="gray" onclick="setLanguage('hi')">Hindi to English</button>
-    <button class="gray" onclick="setLanguage('ur')">Urdu to English</button>
+        <button class="yt" onclick="youtubeSearch()">Open YouTube Search</button>
+        <button class="yt" onclick="youtubeMusicSearch()">Open YouTube Music</button>
 
-    <hr>
+        <button class="nav" onclick="youtubeControl('tab')">Next Item</button>
+        <button class="nav" onclick="youtubeControl('shift_tab')">Previous Item</button>
+        <button class="nav" onclick="youtubeControl('select')">Select / Open</button>
 
-    <button class="feature" onclick="feature('maps')">Open Maps</button>
-    <button class="feature" onclick="feature('weather')">Weather</button>
-    <button class="feature" onclick="feature('news')">News</button>
-    <button class="feature" onclick="feature('summary')">Summarize Conversation</button>
-    <button class="feature" onclick="feature('music')">Music</button>
-    <button class="feature" onclick="feature('call')">Video Call</button>
+        <button class="gray" onclick="youtubeControl('youtube_play_pause')">Play / Pause</button>
+        <button class="gray" onclick="youtubeControl('rewind')">Rewind</button>
+        <button class="gray" onclick="youtubeControl('forward')">Forward</button>
+        <button class="gray" onclick="youtubeControl('mute')">Mute</button>
+        <button class="gray" onclick="youtubeControl('fullscreen')">YouTube Fullscreen</button>
+        <button class="gray" onclick="youtubeControl('escape')">Exit Fullscreen / Back</button>
+        <button class="gray" onclick="youtubeControl('volume_up')">Volume Up</button>
+        <button class="gray" onclick="youtubeControl('volume_down')">Volume Down</button>
 
-    <hr>
+        <button class="feature" onclick="returnToHud()">Return to HUD</button>
+        <button class="danger" onclick="closeYoutube()">Close YouTube</button>
+    </div>
 
-    <button class="gray" onclick="sendLocation()">Send Phone Location to Pi</button>
+    <div class="section">
+        <h3>Features</h3>
+        <button class="feature" onclick="feature('maps')">Open Maps</button>
+        <button class="feature" onclick="feature('weather')">Weather</button>
+        <button class="feature" onclick="feature('news')">News</button>
+        <button class="feature" onclick="feature('summary')">Summarize Conversation</button>
+        <button class="feature" onclick="feature('music')">Music</button>
+        <button class="feature" onclick="feature('call')">Video Call</button>
+    </div>
 
-    <hr>
+    <div class="section">
+        <button class="gray" onclick="sendLocation()">Send Phone Location to Pi</button>
+    </div>
 
-    <h3>HUD Reminder</h3>
-    <input id="reminderText" placeholder="Reminder text">
-    <button class="gray" onclick="addReminder()">Add Reminder</button>
-    <button class="danger" onclick="clearReminders()">Clear Reminders</button>
+    <div class="section">
+        <h3>HUD Reminder</h3>
+        <input id="reminderText" placeholder="Reminder text">
+        <button class="gray" onclick="addReminder()">Add Reminder</button>
+        <button class="danger" onclick="clearReminders()">Clear Reminders</button>
+    </div>
 
-    <hr>
+    <div class="section">
+        <h3>Save Current Unknown Face</h3>
+        <input id="newUnknownName" placeholder="Name, example Aditya">
+        <button class="gray" onclick="saveUnknownFace()">Save Current Unknown</button>
+    </div>
 
-    <h3>Save Current Unknown Face</h3>
-    <input id="newUnknownName" placeholder="Name, example Aditya">
-    <button class="gray" onclick="saveUnknownFace()">Save Current Unknown</button>
+    <div class="section">
+        <h3>Rename Existing Face</h3>
+        <input id="oldName" placeholder="Old name, example Aditya">
+        <input id="newName" placeholder="New name, example Professor">
+        <button class="gray" onclick="renameFace()">Rename Existing Face</button>
+    </div>
 
-    <hr>
-
-    <h3>Rename Existing Face</h3>
-    <input id="oldName" placeholder="Old name, example Aditya">
-    <input id="newName" placeholder="New name, example Professor">
-    <button class="gray" onclick="renameFace()">Rename Existing Face</button>
-
-    <hr>
-
-    <button class="gray" onclick="refreshState()">Refresh State</button>
+    <div class="section">
+        <button class="gray" onclick="refreshState()">Refresh State</button>
+        <button class="danger" onclick="shutdownTrueVision()">Shutdown TrueVision</button>
+    </div>
 
     <pre id="status">Ready</pre>
 
@@ -1502,6 +1774,72 @@ async function setLanguage(language) {
 
 async function feature(name) {
     const res = await fetch('/feature/' + name, {method: 'POST'});
+    const data = await res.json();
+    document.getElementById('status').innerText = JSON.stringify(data, null, 2);
+}
+
+async function youtubeSearch() {
+    const query = document.getElementById('youtubeQuery').value.trim();
+
+    if (!query) {
+        document.getElementById('status').innerText = 'Please enter a YouTube search';
+        return;
+    }
+
+    const res = await fetch('/youtube/search', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({query: query})
+    });
+
+    const data = await res.json();
+    document.getElementById('status').innerText = JSON.stringify(data, null, 2);
+}
+
+async function youtubeMusicSearch() {
+    const query = document.getElementById('youtubeQuery').value.trim();
+
+    if (!query) {
+        document.getElementById('status').innerText = 'Please enter a YouTube Music search';
+        return;
+    }
+
+    const res = await fetch('/youtube/music_search', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({query: query})
+    });
+
+    const data = await res.json();
+    document.getElementById('status').innerText = JSON.stringify(data, null, 2);
+}
+
+async function youtubeControl(name) {
+    const res = await fetch('/youtube/control/' + name, {method: 'POST'});
+    const data = await res.json();
+    document.getElementById('status').innerText = JSON.stringify(data, null, 2);
+}
+
+async function closeYoutube() {
+    const res = await fetch('/youtube/close', {method: 'POST'});
+    const data = await res.json();
+    document.getElementById('status').innerText = JSON.stringify(data, null, 2);
+}
+
+async function returnToHud() {
+    const res = await fetch('/return_to_hud', {method: 'POST'});
+    const data = await res.json();
+    document.getElementById('status').innerText = JSON.stringify(data, null, 2);
+}
+
+async function shutdownTrueVision() {
+    const sure = confirm('Shutdown TrueVision on the Pi?');
+
+    if (!sure) {
+        return;
+    }
+
+    const res = await fetch('/shutdown', {method: 'POST'});
     const data = await res.json();
     document.getElementById('status').innerText = JSON.stringify(data, null, 2);
 }
@@ -1698,6 +2036,38 @@ def run_feature(feature_name: str):
     }
 
 
+@phone_app.post("/youtube/search")
+def youtube_search(payload: Dict[str, str]):
+    query = payload.get("query", "").strip()
+    return open_youtube_search(query)
+
+
+@phone_app.post("/youtube/music_search")
+def youtube_music_search(payload: Dict[str, str]):
+    query = payload.get("query", "").strip()
+    return open_youtube_music_search(query)
+
+
+@phone_app.post("/youtube/control/{control_name}")
+def youtube_control(control_name: str):
+    return youtube_key(control_name)
+
+
+@phone_app.post("/youtube/close")
+def youtube_close():
+    return close_youtube()
+
+
+@phone_app.post("/return_to_hud")
+def return_to_hud_route():
+    return return_to_hud()
+
+
+@phone_app.post("/shutdown")
+def shutdown_route():
+    return shutdown_truevision()
+
+
 @phone_app.post("/location")
 def update_location(payload: Dict[str, float]):
     with state_lock:
@@ -1773,6 +2143,8 @@ def get_state():
             "hud_camera_background": state["hud_camera_background"],
             "reminders": state["reminders"],
             "telegram_notifications": state["telegram_notifications"],
+            "youtube_status": state["youtube_status"],
+            "youtube_last_query": state["youtube_last_query"],
             "uart_connected": state["uart_connected"],
             "dgx_audio_connected": state["dgx_audio_connected"],
             "dgx_face_connected": state["dgx_face_connected"],
