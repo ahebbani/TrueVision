@@ -1,11 +1,9 @@
 import os
-import io
 import cv2
 import json
 import time
 import wave
 import pickle
-import base64
 import tempfile
 import subprocess
 from pathlib import Path
@@ -43,8 +41,8 @@ app = FastAPI(title="TrueVision DGX Server")
 # =========================
 
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base")
-WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cuda")
-WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "float16")
+WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
+WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -63,6 +61,8 @@ conversation_buffer: List[str] = []
 # =========================
 
 print(f"[DGX] Loading Whisper model: {WHISPER_MODEL_SIZE}")
+print(f"[DGX] Whisper device: {WHISPER_DEVICE}")
+print(f"[DGX] Whisper compute type: {WHISPER_COMPUTE_TYPE}")
 
 whisper_model = WhisperModel(
     WHISPER_MODEL_SIZE,
@@ -88,6 +88,11 @@ class SummaryPayload(BaseModel):
 class RenameFacePayload(BaseModel):
     old_name: str
     new_name: str
+
+
+class SaveUnknownFacePayload(BaseModel):
+    pending_face_id: str
+    name: str
 
 
 # =========================
@@ -119,7 +124,7 @@ class FaceMemory:
             self.last_seen = data.get("last_seen", {})
             self.next_person_id = data.get("next_person_id", 1)
 
-            print(f"[DGX] Loaded {len(self.known_names)} faces")
+            print(f"[DGX] Loaded {len(self.known_names)} known faces")
 
         except Exception as e:
             print("[DGX] Failed to load face memory:", e)
@@ -136,11 +141,13 @@ class FaceMemory:
 
         self.path.write_bytes(pickle.dumps(data))
 
-    def recognize_or_create(self, encoding) -> str:
-        now = time.time()
-
+    def recognize(self, encoding):
+        """
+        Recognize known face only.
+        Unknown faces are NOT automatically saved.
+        """
         if len(self.known_encodings) == 0:
-            return self.create_new_person(encoding)
+            return None
 
         matches = face_recognition.compare_faces(
             self.known_encodings,
@@ -161,25 +168,32 @@ class FaceMemory:
                 self.mark_seen(name)
                 return name
 
-        return self.create_new_person(encoding)
+        return None
 
-    def create_new_person(self, encoding) -> str:
+    def save_new_person(self, name: str, encoding) -> str:
+        """
+        Manually save an unknown face with a user-provided name.
+        """
         now = time.time()
 
-        name = f"Person_{self.next_person_id:03d}"
-        self.next_person_id += 1
+        clean_name = name.strip()
+
+        if not clean_name:
+            clean_name = f"Person_{self.next_person_id:03d}"
 
         self.known_encodings.append(encoding)
-        self.known_names.append(name)
+        self.known_names.append(clean_name)
 
-        self.counts[name] = 1
-        self.first_seen[name] = now
-        self.last_seen[name] = now
+        self.counts[clean_name] = 1
+        self.first_seen[clean_name] = now
+        self.last_seen[clean_name] = now
 
+        self.next_person_id += 1
         self.save()
 
-        print(f"[DGX] Created new face: {name}")
-        return name
+        print(f"[DGX] Manually saved new face: {clean_name}")
+
+        return clean_name
 
     def mark_seen(self, name: str):
         now = time.time()
@@ -224,6 +238,10 @@ class FaceMemory:
 
 
 face_memory = FaceMemory(FACE_DB_PATH)
+
+# Pending unknown faces are temporary.
+# They are only saved if phone controller requests save.
+pending_unknown_faces: Dict[str, Any] = {}
 
 
 # =========================
@@ -340,10 +358,24 @@ Conversation:
 
 
 # =========================
-# Audio Transcription
+# Audio Transcription / Translation
 # =========================
 
 def transcribe_wav_file(wav_path: str) -> Dict[str, Any]:
+    """
+    English:
+        transcribe only
+
+    Non-English:
+        translate to English using Whisper task='translate'
+
+    Examples:
+        Spanish -> English
+        German -> English
+        Urdu -> English
+        French -> English
+    """
+
     segments, info = whisper_model.transcribe(
         wav_path,
         beam_size=3,
@@ -357,8 +389,7 @@ def transcribe_wav_file(wav_path: str) -> Dict[str, Any]:
     final_text = original_text
     task = "transcribe"
 
-    # Spanish to English translation
-    if detected_language.startswith("es"):
+    if detected_language and not detected_language.startswith("en"):
         segments_translate, _ = whisper_model.transcribe(
             wav_path,
             beam_size=3,
@@ -367,7 +398,7 @@ def transcribe_wav_file(wav_path: str) -> Dict[str, Any]:
         )
 
         final_text = " ".join(seg.text.strip() for seg in segments_translate).strip()
-        task = "translate_es_to_en"
+        task = f"translate_{detected_language}_to_en"
 
     command = extract_assistant_command(final_text)
 
@@ -399,6 +430,18 @@ def transcribe_wav_file(wav_path: str) -> Dict[str, Any]:
 # Face Recognition
 # =========================
 
+def cleanup_pending_unknown_faces():
+    now = time.time()
+
+    expired = [
+        pid for pid, item in pending_unknown_faces.items()
+        if now - item["created_at"] > 60
+    ]
+
+    for pid in expired:
+        pending_unknown_faces.pop(pid, None)
+
+
 def recognize_faces_from_jpeg(jpeg_bytes: bytes) -> Dict[str, Any]:
     if not FACE_RECOGNITION_AVAILABLE:
         return {
@@ -423,26 +466,53 @@ def recognize_faces_from_jpeg(jpeg_bytes: bytes) -> Dict[str, Any]:
 
     faces = []
 
+    cleanup_pending_unknown_faces()
+
     for location, encoding in zip(locations, encodings):
         top, right, bottom, left = location
 
-        name = face_memory.recognize_or_create(encoding)
-        info = face_memory.info(name)
+        known_name = face_memory.recognize(encoding)
 
-        faces.append({
-            "name": name,
-            "box": [left, top, right, bottom],
-            "seen_count": info["seen_count"],
-            "first_seen": info["first_seen"],
-            "last_seen": info["last_seen"],
-            "frame_width": w,
-            "frame_height": h
-        })
+        if known_name is not None:
+            info = face_memory.info(known_name)
+
+            faces.append({
+                "name": known_name,
+                "known": True,
+                "pending_face_id": None,
+                "box": [left, top, right, bottom],
+                "seen_count": info["seen_count"],
+                "first_seen": info["first_seen"],
+                "last_seen": info["last_seen"],
+                "frame_width": w,
+                "frame_height": h
+            })
+
+        else:
+            pending_face_id = f"unknown_{int(time.time() * 1000)}"
+
+            pending_unknown_faces[pending_face_id] = {
+                "encoding": encoding,
+                "created_at": time.time()
+            }
+
+            faces.append({
+                "name": "Unknown",
+                "known": False,
+                "pending_face_id": pending_face_id,
+                "box": [left, top, right, bottom],
+                "seen_count": None,
+                "first_seen": None,
+                "last_seen": None,
+                "frame_width": w,
+                "frame_height": h
+            })
 
     return {
         "faces": faces,
         "frame_width": w,
-        "frame_height": h
+        "frame_height": h,
+        "pending_unknown_count": len(pending_unknown_faces)
     }
 
 
@@ -456,8 +526,11 @@ def health():
         "ok": True,
         "server": "TrueVision DGX",
         "whisper_model": WHISPER_MODEL_SIZE,
+        "whisper_device": WHISPER_DEVICE,
+        "whisper_compute_type": WHISPER_COMPUTE_TYPE,
         "face_recognition": FACE_RECOGNITION_AVAILABLE,
-        "known_faces": len(face_memory.known_names)
+        "known_faces": len(face_memory.known_names),
+        "pending_unknown_faces": len(pending_unknown_faces)
     }
 
 
@@ -493,7 +566,8 @@ def get_faces():
         "known_names": face_memory.known_names,
         "counts": face_memory.counts,
         "first_seen": face_memory.first_seen,
-        "last_seen": face_memory.last_seen
+        "last_seen": face_memory.last_seen,
+        "pending_unknown_faces": list(pending_unknown_faces.keys())
     }
 
 
@@ -505,6 +579,41 @@ def rename_face(payload: RenameFacePayload):
         "ok": ok,
         "old_name": payload.old_name,
         "new_name": payload.new_name
+    }
+
+
+@app.post("/save_unknown_face")
+def save_unknown_face(payload: SaveUnknownFacePayload):
+    pending_face_id = payload.pending_face_id.strip()
+    name = payload.name.strip()
+
+    if not pending_face_id:
+        return {
+            "ok": False,
+            "error": "Missing pending_face_id"
+        }
+
+    if not name:
+        return {
+            "ok": False,
+            "error": "Missing name"
+        }
+
+    item = pending_unknown_faces.get(pending_face_id)
+
+    if item is None:
+        return {
+            "ok": False,
+            "error": "Pending unknown face expired or not found. Stand in front of the camera again."
+        }
+
+    saved_name = face_memory.save_new_person(name, item["encoding"])
+
+    pending_unknown_faces.pop(pending_face_id, None)
+
+    return {
+        "ok": True,
+        "saved_name": saved_name
     }
 
 

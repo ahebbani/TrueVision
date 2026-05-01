@@ -8,7 +8,6 @@ import serial
 import threading
 import subprocess
 import webbrowser
-from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 import numpy as np
@@ -27,24 +26,24 @@ DGX_HTTP_URL = "http://10.186.78.209:8008"
 DGX_AUDIO_WS_URL = "ws://10.186.78.209:8008/ws/audio"
 DGX_FACE_WS_URL = "ws://10.186.78.209:8008/ws/face"
 
-SERIAL_PORT = os.getenv("SERIAL_PORT", "/dev/serial0")
-SERIAL_BAUD = int(os.getenv("SERIAL_BAUD", "921600"))
+SERIAL_PORT = "/dev/serial0"
+SERIAL_BAUD = 921600
 
-CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
+CAMERA_INDEX = 0
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
 SAMPLE_WIDTH_BYTES = 2
 
-AUDIO_CHUNK_SECONDS = float(os.getenv("AUDIO_CHUNK_SECONDS", "2.5"))
+AUDIO_CHUNK_SECONDS = 2.5
 AUDIO_CHUNK_BYTES = int(SAMPLE_RATE * SAMPLE_WIDTH_BYTES * AUDIO_CHUNK_SECONDS)
 
-FACE_SEND_INTERVAL_SECONDS = float(os.getenv("FACE_SEND_INTERVAL_SECONDS", "0.35"))
-FACE_SEND_WIDTH = int(os.getenv("FACE_SEND_WIDTH", "640"))
-JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "70"))
+FACE_SEND_INTERVAL_SECONDS = 0.35
+FACE_SEND_WIDTH = 640
+JPEG_QUALITY = 70
 
-DISPLAY_WIDTH = int(os.getenv("DISPLAY_WIDTH", "1280"))
-DISPLAY_HEIGHT = int(os.getenv("DISPLAY_HEIGHT", "720"))
+DISPLAY_WIDTH = 1280
+DISPLAY_HEIGHT = 720
 
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
@@ -88,6 +87,7 @@ state = {
     "caption": "",
     "last_original_text": "",
     "last_language": "",
+    "last_task": "",
     "last_command": {},
     "summary": "",
 
@@ -216,7 +216,6 @@ def uart_thread():
                 try:
                     audio_queue.put_nowait(payload)
                 except queue.Full:
-                    # Drop oldest audio if overloaded
                     try:
                         audio_queue.get_nowait()
                         audio_queue.put_nowait(payload)
@@ -280,15 +279,18 @@ def dgx_audio_thread():
                     text = data.get("text", "").strip()
                     original = data.get("original_text", "").strip()
                     language = data.get("detected_language", "")
+                    task = data.get("task", "")
 
                     if text:
                         with state_lock:
                             state["caption"] = text
                             state["last_original_text"] = original
                             state["last_language"] = language
+                            state["last_task"] = task
                             state["last_command"] = data.get("command", {})
 
                         print("[CAPTION]", text)
+                        print("[LANG]", language, "|", task)
 
         except Exception as e:
             print("[PI] Audio WebSocket failed:", e)
@@ -403,10 +405,16 @@ def draw_status(frame):
         audio_connected = state["dgx_audio_connected"]
         face_connected = state["dgx_face_connected"]
         language = state["last_language"]
+        task = state["last_task"]
 
     mode_name = MODE_NAMES.get(mode, "UNKNOWN")
 
-    text = f"Mode: {mode_name} | UART: {'OK' if uart_connected else 'NO'} | Audio DGX: {'OK' if audio_connected else 'NO'} | Face DGX: {'OK' if face_connected else 'NO'}"
+    text = (
+        f"Mode: {mode_name} | "
+        f"UART: {'OK' if uart_connected else 'NO'} | "
+        f"Audio DGX: {'OK' if audio_connected else 'NO'} | "
+        f"Face DGX: {'OK' if face_connected else 'NO'}"
+    )
 
     cv2.rectangle(frame, (0, 0), (frame.shape[1], 42), (0, 0, 0), -1)
 
@@ -422,9 +430,13 @@ def draw_status(frame):
     )
 
     if language:
+        lang_text = f"Language: {language}"
+        if task:
+            lang_text += f" | {task}"
+
         cv2.putText(
             frame,
-            f"Language: {language}",
+            lang_text,
             (15, 70),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.58,
@@ -461,18 +473,23 @@ def draw_faces(frame):
         bottom = int(bottom * scale_y)
 
         name = face.get("name", "Unknown")
-        count = face.get("seen_count", 1)
+        known = face.get("known", True)
+        count = face.get("seen_count", None)
 
-        label = f"{name} | seen {count}x"
+        if known:
+            label = f"{name} | seen {count}x"
+        else:
+            label = "Unknown | save from phone"
 
         cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
 
         label_y = max(top - 10, 30)
+        label_width = min(520, max(230, len(label) * 13))
 
         cv2.rectangle(
             frame,
-            (left, label_y - 26),
-            (left + min(360, len(label) * 13), label_y + 6),
+            (left, label_y - 28),
+            (left + label_width, label_y + 7),
             (0, 255, 0),
             -1
         )
@@ -540,10 +557,8 @@ def maybe_send_frame_to_dgx(frame, last_send_time):
 
 
 def camera_display_thread():
-    print("[PI] Starting camera using old TrueVision camera backend")
+    print("[PI] Starting camera using TrueVision camera backend")
 
-    # Reuse the same camera logic that worked in your old code:
-    # Picamera2 on Raspberry Pi, OpenCV fallback for USB webcam.
     try:
         from picamera2 import Picamera2
         PICAMERA2_AVAILABLE = True
@@ -733,9 +748,11 @@ def open_video_call():
 def fetch_weather():
     if not WEATHER_API_KEY:
         msg = "Weather API key not set on Pi."
+
         with state_lock:
             state["weather"] = msg
             state["caption"] = msg
+
         return
 
     with state_lock:
@@ -854,6 +871,42 @@ def rename_face_on_dgx(old_name: str, new_name: str):
         }
 
 
+def save_unknown_face_on_dgx(name: str):
+    with state_lock:
+        faces = list(state["faces"])
+
+    pending_face_id = None
+
+    for face in faces:
+        if not face.get("known", True) and face.get("pending_face_id"):
+            pending_face_id = face["pending_face_id"]
+            break
+
+    if pending_face_id is None:
+        return {
+            "ok": False,
+            "error": "No unknown face currently visible. Stand in front of the camera first."
+        }
+
+    try:
+        resp = requests.post(
+            f"{DGX_HTTP_URL}/save_unknown_face",
+            json={
+                "pending_face_id": pending_face_id,
+                "name": name
+            },
+            timeout=10
+        )
+
+        return resp.json()
+
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e)
+        }
+
+
 # =========================
 # Phone Controller
 # =========================
@@ -947,10 +1000,16 @@ CONTROL_HTML = """
 
     <hr>
 
-    <h3>Rename Face</h3>
-    <input id="oldName" placeholder="Old name, example Person_001">
+    <h3>Save Current Unknown Face</h3>
+    <input id="newUnknownName" placeholder="Name, example Aditya">
+    <button class="gray" onclick="saveUnknownFace()">Save Current Unknown</button>
+
+    <hr>
+
+    <h3>Rename Existing Face</h3>
+    <input id="oldName" placeholder="Old name, example Aditya">
     <input id="newName" placeholder="New name, example Professor">
-    <button class="gray" onclick="renameFace()">Rename</button>
+    <button class="gray" onclick="renameFace()">Rename Existing Face</button>
 
     <hr>
 
@@ -994,6 +1053,26 @@ function sendLocation() {
     }, function(err) {
         document.getElementById('status').innerText = 'Location error: ' + err.message;
     });
+}
+
+async function saveUnknownFace() {
+    const name = document.getElementById('newUnknownName').value.trim();
+
+    if (!name) {
+        document.getElementById('status').innerText = 'Please enter a name';
+        return;
+    }
+
+    const res = await fetch('/save_unknown_face', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            name: name
+        })
+    });
+
+    const data = await res.json();
+    document.getElementById('status').innerText = JSON.stringify(data, null, 2);
 }
 
 async function renameFace() {
@@ -1115,6 +1194,21 @@ def rename_face(payload: Dict[str, str]):
     return result
 
 
+@phone_app.post("/save_unknown_face")
+def save_unknown_face(payload: Dict[str, str]):
+    name = payload.get("name", "").strip()
+
+    if not name:
+        return {
+            "ok": False,
+            "error": "Missing name"
+        }
+
+    result = save_unknown_face_on_dgx(name)
+
+    return result
+
+
 @phone_app.get("/state")
 def get_state():
     with state_lock:
@@ -1124,6 +1218,7 @@ def get_state():
             "caption": state["caption"],
             "last_original_text": state["last_original_text"],
             "last_language": state["last_language"],
+            "last_task": state["last_task"],
             "summary": state["summary"],
             "faces": state["faces"],
             "weather": state["weather"],
