@@ -301,6 +301,20 @@ def dgx_audio_thread():
                     language = data.get("detected_language", "")
                     selected_language = data.get("selected_language", "")
                     task = data.get("task", "")
+                    reminder_result = data.get("reminder_result", {})
+
+                    if reminder_result.get("is_reminder"):
+                        reminder_text = reminder_result.get("text", "").strip()
+
+                        if reminder_text:
+                            reminder_text = sanitize_hud_text(reminder_text)
+
+                            with state_lock:
+                                state["reminders"].append(reminder_text)
+                                state["reminders"] = state["reminders"][-5:]
+                                state["caption"] = "Reminder added: " + reminder_text
+
+                            print("[REMINDER ADDED]", reminder_text)
 
                     if text:
                         with state_lock:
@@ -732,10 +746,16 @@ def hud_draw_faces(frame):
             last_seen = face.get("last_seen")
             last_seen_text = format_timestamp(last_seen)
             last_seen_ago = format_time_ago(last_seen)
+            note = sanitize_hud_text(face.get("note", ""))
 
             label = f"{name}"
-            sub_label = f"seen {count}x | last {last_seen_ago}"
-            sub_label_2 = last_seen_text
+
+            if note:
+                sub_label = note[:30]
+                sub_label_2 = f"seen {count}x | last {last_seen_ago}"
+            else:
+                sub_label = f"seen {count}x | last {last_seen_ago}"
+                sub_label_2 = last_seen_text
         else:
             label = "Unknown"
             sub_label = "save from phone"
@@ -1618,6 +1638,57 @@ def open_video_call():
     return open_browser_url(url)
 
 
+def emergency_telegram_alert():
+    with state_lock:
+        loc = dict(state.get("location", {}))
+        location_label = state.get("location_label", "Unknown location")
+
+    lat = loc.get("lat")
+    lon = loc.get("lon")
+
+    if lat is not None and lon is not None:
+        maps_link = f"https://www.google.com/maps?q={lat},{lon}"
+        message = (
+            "EMERGENCY ALERT from TrueVision.\n"
+            f"Location: {location_label}\n"
+            f"Coordinates: {lat}, {lon}\n"
+            f"Map: {maps_link}"
+        )
+    else:
+        message = (
+            "EMERGENCY ALERT from TrueVision.\n"
+            f"Location: {location_label}"
+        )
+
+    try:
+        resp = requests.post(
+            f"{DGX_HTTP_URL}/telegram",
+            json={
+                "command": message
+            },
+            timeout=15,
+        )
+
+        data = resp.json()
+
+        with state_lock:
+            if data.get("ok"):
+                state["caption"] = "Emergency alert sent."
+            else:
+                state["caption"] = "Emergency alert failed."
+
+        return data
+
+    except Exception as e:
+        with state_lock:
+            state["caption"] = "Emergency alert failed: " + str(e)
+
+        return {
+            "ok": False,
+            "error": str(e),
+        }
+
+
 def fetch_weather():
     with state_lock:
         loc = state.get("location")
@@ -1763,6 +1834,26 @@ def save_unknown_face_on_dgx(name: str):
             f"{DGX_HTTP_URL}/save_unknown_face",
             json={
                 "name": name,
+            },
+            timeout=10,
+        )
+
+        return resp.json()
+
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e),
+        }
+
+
+def update_face_note_on_dgx(name: str, note: str):
+    try:
+        resp = requests.post(
+            f"{DGX_HTTP_URL}/face_note",
+            json={
+                "name": name,
+                "note": note,
             },
             timeout=10,
         )
@@ -2050,6 +2141,18 @@ CONTROL_HTML = """
         <input id="oldName" placeholder="Old name, example Aditya">
         <input id="newName" placeholder="New name, example Professor">
         <button class="gray" onclick="renameFace()">Rename Existing Face</button>
+    </div>
+
+    <div class="section">
+        <h3>Face Context Note</h3>
+        <input id="faceNoteName" placeholder="Face name, example Aditya">
+        <input id="faceNoteText" placeholder="Note, example PCB teammate">
+        <button class="gray" onclick="updateFaceNote()">Save Face Note</button>
+    </div>
+
+    <div class="section">
+        <h3>Emergency</h3>
+        <button class="danger" onclick="sendEmergency()">Send Emergency Telegram Alert</button>
     </div>
 
     <div class="section">
@@ -2481,6 +2584,43 @@ async function renameFace() {
     document.getElementById('status').innerText = JSON.stringify(data, null, 2);
 }
 
+async function updateFaceNote() {
+    const name = document.getElementById('faceNoteName').value.trim();
+    const note = document.getElementById('faceNoteText').value.trim();
+
+    if (!name || !note) {
+        document.getElementById('status').innerText = 'Please enter face name and note';
+        return;
+    }
+
+    const res = await fetch('/face_note', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            name: name,
+            note: note
+        })
+    });
+
+    const data = await res.json();
+    document.getElementById('status').innerText = JSON.stringify(data, null, 2);
+}
+
+async function sendEmergency() {
+    const sure = confirm('Send emergency Telegram alert?');
+
+    if (!sure) {
+        return;
+    }
+
+    const res = await fetch('/emergency', {
+        method: 'POST'
+    });
+
+    const data = await res.json();
+    document.getElementById('status').innerText = JSON.stringify(data, null, 2);
+}
+
 async function refreshState() {
     const res = await fetch('/state');
     const data = await res.json();
@@ -2725,6 +2865,25 @@ def rename_face(payload: Dict[str, str]):
         }
 
     return rename_face_on_dgx(old_name, new_name)
+
+
+@phone_app.post("/face_note")
+def face_note_route(payload: Dict[str, str]):
+    name = payload.get("name", "").strip()
+    note = payload.get("note", "").strip()
+
+    if not name:
+        return {
+            "ok": False,
+            "error": "Missing name",
+        }
+
+    return update_face_note_on_dgx(name, note)
+
+
+@phone_app.post("/emergency")
+def emergency_route():
+    return emergency_telegram_alert()
 
 
 @phone_app.post("/save_unknown_face")

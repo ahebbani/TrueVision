@@ -123,6 +123,11 @@ class SaveUnknownFacePayload(BaseModel):
     name: str
 
 
+class FaceNotePayload(BaseModel):
+    name: str
+    note: str
+
+
 class LanguagePayload(BaseModel):
     language: str
 
@@ -139,6 +144,7 @@ class FaceMemory:
         self.counts: Dict[str, int] = {}
         self.first_seen: Dict[str, float] = {}
         self.last_seen: Dict[str, float] = {}
+        self.notes: Dict[str, str] = {}
         self.next_person_id = 1
         self.load()
 
@@ -155,6 +161,7 @@ class FaceMemory:
             self.counts = data.get("counts", {})
             self.first_seen = data.get("first_seen", {})
             self.last_seen = data.get("last_seen", {})
+            self.notes = data.get("notes", {})
             self.next_person_id = data.get("next_person_id", 1)
 
             print(f"[DGX] Loaded {len(self.known_names)} known faces")
@@ -169,6 +176,7 @@ class FaceMemory:
             "counts": self.counts,
             "first_seen": self.first_seen,
             "last_seen": self.last_seen,
+            "notes": self.notes,
             "next_person_id": self.next_person_id,
         }
 
@@ -216,6 +224,7 @@ class FaceMemory:
         self.counts[clean_name] = 1
         self.first_seen[clean_name] = now
         self.last_seen[clean_name] = now
+        self.notes.setdefault(clean_name, "")
 
         self.next_person_id += 1
         self.save()
@@ -260,6 +269,9 @@ class FaceMemory:
         if old_name in self.last_seen:
             self.last_seen[new_name] = self.last_seen.pop(old_name)
 
+        if old_name in self.notes:
+            self.notes[new_name] = self.notes.pop(old_name)
+
         self.save()
         return True
 
@@ -269,7 +281,22 @@ class FaceMemory:
             "seen_count": self.counts.get(name, 1),
             "first_seen": self.first_seen.get(name),
             "last_seen": self.last_seen.get(name),
+            "note": self.notes.get(name, ""),
         }
+
+    def update_note(self, name: str, note: str) -> bool:
+        name = name.strip()
+        note = note.strip()
+
+        if not name:
+            return False
+
+        if name not in self.known_names:
+            return False
+
+        self.notes[name] = note
+        self.save()
+        return True
 
 
 face_memory = FaceMemory(FACE_DB_PATH)
@@ -530,6 +557,52 @@ def process_telegram_command(transcript: str) -> Dict[str, Any]:
     }
 
 
+def process_reminder_command(transcript: str) -> Dict[str, Any]:
+    """
+    Detect simple spoken reminder commands.
+
+    Examples:
+      Remind me to email professor tonight.
+      Remember to submit the report.
+      Add reminder to charge the glasses.
+    """
+
+    raw = transcript.strip()
+
+    if not raw:
+        return {
+            "is_reminder": False
+        }
+
+    lower = raw.lower()
+
+    triggers = [
+        "remind me to ",
+        "remember to ",
+        "add reminder to ",
+        "add a reminder to ",
+        "set reminder to ",
+        "set a reminder to ",
+    ]
+
+    for trigger in triggers:
+        if trigger in lower:
+            idx = lower.find(trigger)
+            reminder = raw[idx + len(trigger):].strip()
+            reminder = reminder.strip(" .,")
+
+            if reminder:
+                return {
+                    "is_reminder": True,
+                    "text": reminder,
+                    "source": trigger.strip()
+                }
+
+    return {
+        "is_reminder": False
+    }
+
+
 # =========================
 # Telegram Incoming Polling
 # =========================
@@ -712,6 +785,7 @@ def transcribe_wav_file(wav_path: str) -> Dict[str, Any]:
     print(f"[DGX TRANSCRIPT] selected={language} detected={detected_language} task={task}: {final_text}")
 
     command = process_telegram_command(final_text)
+    reminder_result = process_reminder_command(final_text)
 
     telegram_result = command.get("telegram_result")
 
@@ -734,7 +808,8 @@ def transcribe_wav_file(wav_path: str) -> Dict[str, Any]:
         "selected_language": language,
         "task": task,
         "command": command,
-        "telegram_result": telegram_result
+        "telegram_result": telegram_result,
+        "reminder_result": reminder_result
     }
 
 
@@ -782,6 +857,7 @@ def recognize_faces_from_jpeg(jpeg_bytes: bytes) -> Dict[str, Any]:
                 "seen_count": info["seen_count"],
                 "first_seen": info["first_seen"],
                 "last_seen": info["last_seen"],
+                "note": info.get("note", ""),
                 "frame_width": w,
                 "frame_height": h
             })
@@ -825,6 +901,7 @@ def health():
         "whisper_compute_type": WHISPER_COMPUTE_TYPE,
         "face_recognition": FACE_RECOGNITION_AVAILABLE,
         "known_faces": len(face_memory.known_names),
+        "face_notes": len([n for n in face_memory.notes.values() if n]),
         "active_language": ACTIVE_LANGUAGE,
         "supported_languages": sorted(list(SUPPORTED_LANGUAGES)),
         "telegram_enabled": bool(
@@ -944,6 +1021,7 @@ def get_faces():
         "counts": face_memory.counts,
         "first_seen": face_memory.first_seen,
         "last_seen": face_memory.last_seen,
+        "notes": face_memory.notes,
         "latest_unknown_available": latest_unknown_face["encoding"] is not None,
         "latest_unknown_age": time.time() - latest_unknown_face["updated_at"]
         if latest_unknown_face["encoding"] is not None else None
@@ -958,6 +1036,18 @@ def rename_face(payload: RenameFacePayload):
         "ok": ok,
         "old_name": payload.old_name,
         "new_name": payload.new_name
+    }
+
+
+@app.post("/face_note")
+def update_face_note(payload: FaceNotePayload):
+    ok = face_memory.update_note(payload.name, payload.note)
+
+    return {
+        "ok": ok,
+        "name": payload.name,
+        "note": payload.note,
+        "error": None if ok else "Face name not found"
     }
 
 
