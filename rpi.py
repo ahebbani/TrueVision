@@ -46,7 +46,7 @@ JPEG_QUALITY = 70
 DISPLAY_WIDTH = 640
 DISPLAY_HEIGHT = 480
 
-# Open-Meteo does not require an API key.
+# Default location: West Lafayette, Indiana
 DEFAULT_LAT = 40.4237
 DEFAULT_LON = -86.9212
 
@@ -102,8 +102,14 @@ state = {
     "weather": "",
     "weather_temp": "--",
     "weather_last_updated": 0,
+
     "news": "",
-    "location": None,
+
+    "location": {
+        "lat": DEFAULT_LAT,
+        "lon": DEFAULT_LON,
+    },
+    "location_label": "West Lafayette, IN",
 
     "hud_camera_background": True,
 
@@ -389,7 +395,34 @@ def telegram_notifications_thread():
 # HUD Drawing Helpers
 # =========================
 
+def sanitize_hud_text(text: str) -> str:
+    """
+    OpenCV Hershey fonts cannot render many Unicode symbols.
+    This removes/replaces characters that show up as ??? on the HUD.
+    """
+    if text is None:
+        return ""
+
+    text = str(text)
+    replacements = {
+        "°": "",
+        "•": "-",
+        "—": "-",
+        "–": "-",
+        "’": "'",
+        "“": '"',
+        "”": '"',
+        "…": "...",
+    }
+
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    return text.encode("ascii", errors="ignore").decode("ascii")
+
+
 def wrap_text(text: str, max_chars: int = 64) -> List[str]:
+    text = sanitize_hud_text(text)
     words = text.split()
     lines = []
     current = ""
@@ -466,39 +499,35 @@ def get_wifi_signal() -> str:
     return "N/A"
 
 
+def hud_text(frame, text, pos, scale, color, thickness=1):
+    clean = sanitize_hud_text(text)
+    cv2.putText(
+        frame,
+        clean,
+        pos,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        scale,
+        color,
+        thickness,
+        cv2.LINE_AA,
+    )
+
+
 def hud_draw_clock_date(frame):
     now = datetime.now()
 
     time_str = now.strftime("%I:%M %p").lstrip("0")
     date_str = now.strftime("%a, %b %d")
 
-    cv2.putText(
-        frame,
-        time_str,
-        (12, 30),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.78,
-        (255, 255, 255),
-        2,
-        cv2.LINE_AA,
-    )
-
-    cv2.putText(
-        frame,
-        date_str,
-        (13, 52),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.43,
-        (205, 205, 205),
-        1,
-        cv2.LINE_AA,
-    )
+    hud_text(frame, time_str, (12, 30), 0.78, (255, 255, 255), 2)
+    hud_text(frame, date_str, (13, 52), 0.43, (205, 205, 205), 1)
 
 
 def hud_draw_weather_slot(frame):
     with state_lock:
         temp = state.get("weather_temp", "--")
         last_updated = state.get("weather_last_updated", 0)
+        location_label = state.get("location_label", "West Lafayette, IN")
 
     if not temp:
         temp = "--"
@@ -506,41 +535,13 @@ def hud_draw_weather_slot(frame):
     x = 14
     y = 76
 
-    cv2.putText(
-        frame,
-        "TEMP",
-        (x, y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.34,
-        (0, 220, 255),
-        1,
-        cv2.LINE_AA,
-    )
-
-    cv2.putText(
-        frame,
-        temp,
-        (x + 52, y + 1),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.46,
-        (255, 255, 255),
-        1,
-        cv2.LINE_AA,
-    )
+    hud_text(frame, "TEMP", (x, y), 0.34, (0, 220, 255), 1)
+    hud_text(frame, temp, (x + 52, y + 1), 0.46, (255, 255, 255), 1)
+    hud_text(frame, location_label[:20], (x, y + 17), 0.30, (210, 210, 210), 1)
 
     if last_updated:
         age = format_time_ago(last_updated)
-
-        cv2.putText(
-            frame,
-            age,
-            (x + 112, y + 1),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.32,
-            (170, 170, 170),
-            1,
-            cv2.LINE_AA,
-        )
+        hud_text(frame, age, (x + 112, y + 1), 0.30, (170, 170, 170), 1)
 
 
 def hud_draw_system_status(frame):
@@ -570,29 +571,10 @@ def hud_draw_system_status(frame):
     elif temp > 60:
         temp_color = (0, 255, 255)
 
-    cv2.putText(
-        frame,
-        f"CPU {temp:.1f}C",
-        (x, y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.40,
-        temp_color,
-        1,
-        cv2.LINE_AA,
-    )
+    hud_text(frame, f"CPU {temp:.1f}C", (x, y), 0.40, temp_color, 1)
 
     wifi = get_wifi_signal()
-
-    cv2.putText(
-        frame,
-        f"WiFi {wifi}",
-        (x + 90, y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.40,
-        (255, 255, 255),
-        1,
-        cv2.LINE_AA,
-    )
+    hud_text(frame, f"WiFi {wifi}", (x + 90, y), 0.40, (255, 255, 255), 1)
 
     y += 18
 
@@ -600,45 +582,16 @@ def hud_draw_system_status(frame):
     server_text = "OK" if server_available else "NO"
 
     cv2.circle(frame, (x + 6, y - 4), 4, server_color, -1)
-
-    cv2.putText(
-        frame,
-        f"DGX: {server_text}",
-        (x + 16, y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.40,
-        (255, 255, 255),
-        1,
-        cv2.LINE_AA,
-    )
+    hud_text(frame, f"DGX: {server_text}", (x + 16, y), 0.40, (255, 255, 255), 1)
 
     y += 18
 
     bg_text = "Cam" if hud_camera_background else "Black"
-
-    cv2.putText(
-        frame,
-        f"{mode_name} | HUD:{bg_text}",
-        (x + 16, y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.40,
-        (255, 210, 0),
-        1,
-        cv2.LINE_AA,
-    )
+    hud_text(frame, f"{mode_name} | HUD:{bg_text}", (x + 16, y), 0.40, (255, 210, 0), 1)
 
     y += 18
 
-    cv2.putText(
-        frame,
-        f"UART: {'OK' if uart_connected else 'NO'}",
-        (x + 16, y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.36,
-        (180, 220, 255),
-        1,
-        cv2.LINE_AA,
-    )
+    hud_text(frame, f"UART: {'OK' if uart_connected else 'NO'}", (x + 16, y), 0.36, (180, 220, 255), 1)
 
     y += 17
 
@@ -647,29 +600,11 @@ def hud_draw_system_status(frame):
     if last_language:
         lang_text += f" Det:{last_language}"
 
-    cv2.putText(
-        frame,
-        lang_text[:30],
-        (x + 16, y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.34,
-        (180, 220, 255),
-        1,
-        cv2.LINE_AA,
-    )
+    hud_text(frame, lang_text[:30], (x + 16, y), 0.34, (180, 220, 255), 1)
 
     if youtube_status:
         y += 17
-        cv2.putText(
-            frame,
-            f"YT: {youtube_status[:22]}",
-            (x + 16, y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.34,
-            (255, 180, 180),
-            1,
-            cv2.LINE_AA,
-        )
+        hud_text(frame, f"YT: {youtube_status[:22]}", (x + 16, y), 0.34, (255, 180, 180), 1)
 
 
 def hud_draw_info_cards(frame):
@@ -679,7 +614,7 @@ def hud_draw_info_cards(frame):
         telegram_notifications = list(state["telegram_notifications"])
         youtube_last_query = state["youtube_last_query"]
 
-    y = 102
+    y = 112
 
     cards = []
 
@@ -703,33 +638,13 @@ def hud_draw_info_cards(frame):
         cards.append(("SUMMARY", summary[:70]))
 
     for title, text in cards[:4]:
-        cv2.putText(
-            frame,
-            title,
-            (14, y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.36,
-            (0, 220, 255),
-            1,
-            cv2.LINE_AA,
-        )
-
+        hud_text(frame, title, (14, y), 0.36, (0, 220, 255), 1)
         y += 17
 
         lines = wrap_text(text, max_chars=32)
 
         for line in lines[:2]:
-            cv2.putText(
-                frame,
-                line,
-                (14, y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.38,
-                (230, 230, 230),
-                1,
-                cv2.LINE_AA,
-            )
-
+            hud_text(frame, line, (14, y), 0.38, (230, 230, 230), 1)
             y += 17
 
         y += 9
@@ -766,28 +681,10 @@ def hud_draw_reminders_slot(frame):
         1,
     )
 
-    cv2.putText(
-        frame,
-        "REMINDERS",
-        (box_x + 9, box_y + 18),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.36,
-        (0, 220, 255),
-        1,
-        cv2.LINE_AA,
-    )
+    hud_text(frame, "REMINDERS", (box_x + 9, box_y + 18), 0.36, (0, 220, 255), 1)
 
     if not reminders:
-        cv2.putText(
-            frame,
-            "No reminders",
-            (box_x + 9, box_y + 45),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.38,
-            (180, 180, 180),
-            1,
-            cv2.LINE_AA,
-        )
+        hud_text(frame, "No reminders", (box_x + 9, box_y + 45), 0.38, (180, 180, 180), 1)
         return
 
     y = box_y + 42
@@ -796,16 +693,7 @@ def hud_draw_reminders_slot(frame):
         lines = wrap_text(reminder, max_chars=24)
 
         for line in lines[:2]:
-            cv2.putText(
-                frame,
-                "• " + line[:26],
-                (box_x + 9, y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.34,
-                (235, 235, 235),
-                1,
-                cv2.LINE_AA,
-            )
+            hud_text(frame, "- " + line[:26], (box_x + 9, y), 0.34, (235, 235, 235), 1)
             y += 16
 
             if y > box_y + box_h - 8:
@@ -858,39 +746,11 @@ def hud_draw_faces(frame):
         label_x = min(right + 8, w - 160)
         label_y = max(top + 18, 70)
 
-        cv2.putText(
-            frame,
-            label[:18],
-            (label_x, label_y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.48,
-            (255, 255, 255),
-            1,
-            cv2.LINE_AA,
-        )
-
-        cv2.putText(
-            frame,
-            sub_label[:30],
-            (label_x, label_y + 18),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.34,
-            (180, 255, 180),
-            1,
-            cv2.LINE_AA,
-        )
+        hud_text(frame, label[:18], (label_x, label_y), 0.48, (255, 255, 255), 1)
+        hud_text(frame, sub_label[:30], (label_x, label_y + 18), 0.34, (180, 255, 180), 1)
 
         if sub_label_2:
-            cv2.putText(
-                frame,
-                sub_label_2[:24],
-                (label_x, label_y + 34),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.32,
-                (200, 200, 200),
-                1,
-                cv2.LINE_AA,
-            )
+            hud_text(frame, sub_label_2[:24], (label_x, label_y + 34), 0.32, (200, 200, 200), 1)
 
 
 def hud_draw_captions(frame):
@@ -917,7 +777,7 @@ def hud_draw_captions(frame):
     if selected_language and selected_language != "en":
         prefix = f"({lang_map.get(selected_language, selected_language.upper())}) "
 
-    full_text = prefix + caption
+    full_text = sanitize_hud_text(prefix + caption)
 
     font = cv2.FONT_HERSHEY_SIMPLEX
     scale = 0.50
@@ -955,47 +815,7 @@ def hud_draw_captions(frame):
     y = y_start + 24
 
     for line in lines_to_show:
-        if line.startswith("(") and ")" in line:
-            end_idx = line.find(")") + 1
-            lang_prefix = line[:end_idx]
-            rest = line[end_idx:]
-
-            cv2.putText(
-                frame,
-                lang_prefix,
-                (18, y),
-                font,
-                scale,
-                (0, 255, 255),
-                thickness,
-                cv2.LINE_AA,
-            )
-
-            prefix_size, _ = cv2.getTextSize(lang_prefix, font, scale, thickness)
-
-            cv2.putText(
-                frame,
-                rest,
-                (18 + prefix_size[0], y),
-                font,
-                scale,
-                (255, 255, 255),
-                thickness,
-                cv2.LINE_AA,
-            )
-
-        else:
-            cv2.putText(
-                frame,
-                line,
-                (18, y),
-                font,
-                scale,
-                (255, 255, 255),
-                thickness,
-                cv2.LINE_AA,
-            )
-
+        hud_text(frame, line, (18, y), scale, (255, 255, 255), thickness)
         y += 24
 
 
@@ -1800,7 +1620,8 @@ def open_video_call():
 
 def fetch_weather():
     with state_lock:
-        loc = state["location"]
+        loc = state.get("location")
+        location_label = state.get("location_label", "West Lafayette, IN")
 
     if loc and "lat" in loc and "lon" in loc:
         lat = loc["lat"]
@@ -1808,6 +1629,7 @@ def fetch_weather():
     else:
         lat = DEFAULT_LAT
         lon = DEFAULT_LON
+        location_label = "West Lafayette, IN"
 
     url = (
         "https://api.open-meteo.com/v1/forecast"
@@ -1824,15 +1646,15 @@ def fetch_weather():
         if temp is None:
             raise RuntimeError(f"No temperature in response: {data}")
 
-        temp_text = f"{float(temp):.0f}°F"
-        full_text = temp_text
+        temp_text = f"{float(temp):.0f}F"
 
         with state_lock:
-            state["weather"] = full_text
+            state["weather"] = temp_text
             state["weather_temp"] = temp_text
             state["weather_last_updated"] = time.time()
+            state["location_label"] = location_label
 
-        print("[PI] Weather:", full_text)
+        print("[PI] Weather:", temp_text, "|", location_label)
 
     except Exception as e:
         msg = f"Weather failed: {e}"
@@ -1980,7 +1802,7 @@ def set_language_on_dgx(language: str):
 
 
 def add_reminder(text: str):
-    clean = text.strip()
+    clean = sanitize_hud_text(text.strip())
 
     if not clean:
         return {
@@ -2195,17 +2017,19 @@ CONTROL_HTML = """
     </div>
 
     <div class="section">
+        <h3>Location / Weather</h3>
+        <button class="gray" onclick="sendLocation()">Use Phone GPS Location</button>
+        <button class="gray" onclick="setWestLafayette()">Set West Lafayette</button>
+        <button class="feature" onclick="feature('weather')">Refresh Weather</button>
+    </div>
+
+    <div class="section">
         <h3>Features</h3>
         <button class="feature" onclick="feature('maps')">Open Maps</button>
-        <button class="feature" onclick="feature('weather')">Weather</button>
         <button class="feature" onclick="feature('news')">News</button>
         <button class="feature" onclick="feature('summary')">Summarize Conversation</button>
         <button class="feature" onclick="feature('music')">Music</button>
         <button class="feature" onclick="feature('call')">Video Call</button>
-    </div>
-
-    <div class="section">
-        <button class="gray" onclick="sendLocation()">Send Phone Location to Pi</button>
     </div>
 
     <div class="section">
@@ -2584,6 +2408,15 @@ function sendLocation() {
     });
 }
 
+async function setWestLafayette() {
+    const res = await fetch('/location/west_lafayette', {
+        method: 'POST'
+    });
+
+    const data = await res.json();
+    document.getElementById('status').innerText = JSON.stringify(data, null, 2);
+}
+
 async function addReminder() {
     const text = document.getElementById('reminderText').value.trim();
 
@@ -2830,17 +2663,41 @@ def mouse_drag_end_route():
 
 @phone_app.post("/location")
 def update_location(payload: Dict[str, float]):
+    lat = float(payload["lat"])
+    lon = float(payload["lon"])
+
     with state_lock:
         state["location"] = {
-            "lat": payload["lat"],
-            "lon": payload["lon"],
+            "lat": lat,
+            "lon": lon,
         }
+        state["location_label"] = "Phone GPS"
 
     threading.Thread(target=fetch_weather, daemon=True).start()
 
     return {
         "ok": True,
         "location": state["location"],
+        "location_label": "Phone GPS",
+        "weather_update": "started",
+    }
+
+
+@phone_app.post("/location/west_lafayette")
+def set_west_lafayette_location():
+    with state_lock:
+        state["location"] = {
+            "lat": DEFAULT_LAT,
+            "lon": DEFAULT_LON,
+        }
+        state["location_label"] = "West Lafayette, IN"
+
+    threading.Thread(target=fetch_weather, daemon=True).start()
+
+    return {
+        "ok": True,
+        "location": state["location"],
+        "location_label": "West Lafayette, IN",
         "weather_update": "started",
     }
 
@@ -2901,6 +2758,7 @@ def get_state():
             "weather_last_updated": state["weather_last_updated"],
             "news": state["news"],
             "location": state["location"],
+            "location_label": state["location_label"],
             "hud_camera_background": state["hud_camera_background"],
             "reminders": state["reminders"],
             "telegram_notifications": state["telegram_notifications"],
