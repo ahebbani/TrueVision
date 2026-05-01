@@ -8,8 +8,10 @@ import serial
 import threading
 import subprocess
 import webbrowser
+from datetime import datetime
 from typing import Optional, Dict, Any, List
 
+import numpy as np
 import requests
 import websocket
 from fastapi import FastAPI
@@ -98,6 +100,14 @@ state = {
     "news": "",
     "location": None,
 
+    # HUD display mode
+    # True  = show camera behind HUD
+    # False = black background HUD
+    "hud_camera_background": True,
+
+    # Optional reminder strings shown on HUD
+    "reminders": [],
+
     "dgx_audio_connected": False,
     "dgx_face_connected": False,
     "uart_connected": False,
@@ -122,6 +132,14 @@ class UARTPacketReader:
         )
 
     def read_packet(self) -> Optional[Dict[str, Any]]:
+        """
+        ESP32 packet format:
+            AA 55 TYPE LEN_LOW LEN_HIGH PAYLOAD CHECKSUM
+
+        CHECKSUM:
+            sum(payload bytes) & 0xFF
+        """
+
         while True:
             b = self.ser.read(1)
 
@@ -303,7 +321,7 @@ def dgx_audio_thread():
 
 
 # =========================
-# Face frames to DGX
+# Face Frames to DGX
 # =========================
 
 def dgx_face_thread():
@@ -347,7 +365,7 @@ def dgx_face_thread():
 
 
 # =========================
-# Drawing
+# HUD Drawing
 # =========================
 
 def wrap_text(text: str, max_chars: int = 64) -> List[str]:
@@ -369,72 +387,164 @@ def wrap_text(text: str, max_chars: int = 64) -> List[str]:
     return lines
 
 
-def draw_caption(frame, caption: str):
-    if not caption:
-        return frame
+def get_cpu_temp_c() -> float:
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+            return float(f.read().strip()) / 1000.0
+    except Exception:
+        return 0.0
 
+
+def get_wifi_signal() -> str:
+    try:
+        output = subprocess.check_output(
+            ["iwconfig", "wlan0"],
+            stderr=subprocess.DEVNULL
+        ).decode("utf-8", errors="ignore")
+
+        if "Signal level=" in output:
+            idx = output.find("Signal level=") + len("Signal level=")
+            val = output[idx:idx + 7].split()[0]
+            return f"{val} dBm"
+
+    except Exception:
+        pass
+
+    return "N/A"
+
+
+def hud_draw_clock_date(frame):
+    now = datetime.now()
+
+    time_str = now.strftime("%I:%M %p").lstrip("0")
+    date_str = now.strftime("%a, %b %d")
+
+    cv2.putText(
+        frame,
+        time_str,
+        (20, 42),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.2,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA
+    )
+
+    cv2.putText(
+        frame,
+        date_str,
+        (22, 74),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.65,
+        (200, 200, 200),
+        1,
+        cv2.LINE_AA
+    )
+
+
+def hud_draw_system_status(frame):
     h, w = frame.shape[:2]
 
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (20, h - 150), (w - 20, h - 20), (0, 0, 0), -1)
-    frame = cv2.addWeighted(overlay, 0.60, frame, 0.40, 0)
-
-    lines = wrap_text(caption, max_chars=70)
-
-    y = h - 108
-
-    for line in lines[:3]:
-        cv2.putText(
-            frame,
-            line,
-            (40, y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.78,
-            (255, 255, 255),
-            2,
-            cv2.LINE_AA
-        )
-        y += 35
-
-    return frame
-
-
-def draw_status(frame):
     with state_lock:
         mode = state["mode"]
         uart_connected = state["uart_connected"]
         audio_connected = state["dgx_audio_connected"]
         face_connected = state["dgx_face_connected"]
-        language = state["last_language"]
         selected_language = state["selected_language"]
+        last_language = state["last_language"]
         task = state["last_task"]
+        hud_camera_background = state["hud_camera_background"]
 
     mode_name = MODE_NAMES.get(mode, "UNKNOWN")
+    server_available = audio_connected and face_connected
 
-    text = (
-        f"Mode: {mode_name} | "
-        f"UART: {'OK' if uart_connected else 'NO'} | "
-        f"Audio DGX: {'OK' if audio_connected else 'NO'} | "
-        f"Face DGX: {'OK' if face_connected else 'NO'}"
-    )
+    x = w - 355
+    y = 32
 
-    cv2.rectangle(frame, (0, 0), (frame.shape[1], 42), (0, 0, 0), -1)
+    temp = get_cpu_temp_c()
+    temp_color = (0, 255, 0)
+
+    if temp > 75:
+        temp_color = (0, 0, 255)
+    elif temp > 60:
+        temp_color = (0, 255, 255)
 
     cv2.putText(
         frame,
-        text,
-        (15, 28),
+        f"CPU {temp:.1f}C",
+        (x, y),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.62,
-        (0, 255, 255),
+        0.58,
+        temp_color,
+        1,
+        cv2.LINE_AA
+    )
+
+    wifi = get_wifi_signal()
+
+    cv2.putText(
+        frame,
+        f"WiFi {wifi}",
+        (x + 120, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.58,
+        (255, 255, 255),
+        1,
+        cv2.LINE_AA
+    )
+
+    y += 28
+
+    server_color = (0, 255, 0) if server_available else (0, 0, 255)
+    server_text = "Connected" if server_available else "Disconnected"
+
+    cv2.circle(frame, (x + 8, y - 5), 5, server_color, -1)
+
+    cv2.putText(
+        frame,
+        f"DGX: {server_text}",
+        (x + 24, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.58,
+        (255, 255, 255),
+        1,
+        cv2.LINE_AA
+    )
+
+    y += 28
+
+    bg_text = "Camera" if hud_camera_background else "Black"
+
+    cv2.putText(
+        frame,
+        f"Mode: {mode_name} | HUD: {bg_text}",
+        (x + 24, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.58,
+        (255, 210, 0),
         2,
         cv2.LINE_AA
     )
 
-    lang_text = f"Selected language: {selected_language}"
+    y += 28
 
-    if language:
-        lang_text += f" | Detected: {language}"
+    cv2.putText(
+        frame,
+        f"UART: {'OK' if uart_connected else 'NO'}",
+        (x + 24, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.52,
+        (180, 220, 255),
+        1,
+        cv2.LINE_AA
+    )
+
+    y += 25
+
+    lang_text = f"Lang: {selected_language}"
+
+    if last_language:
+        lang_text += f" | Detected: {last_language}"
 
     if task:
         lang_text += f" | {task}"
@@ -442,18 +552,74 @@ def draw_status(frame):
     cv2.putText(
         frame,
         lang_text,
-        (15, 70),
+        (x + 24, y),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.58,
-        (0, 255, 255),
-        2,
+        0.50,
+        (180, 220, 255),
+        1,
         cv2.LINE_AA
     )
 
-    return frame
+
+def hud_draw_info_cards(frame):
+    h, w = frame.shape[:2]
+
+    with state_lock:
+        weather = state["weather"]
+        news = state["news"]
+        summary = state["summary"]
+        reminders = list(state["reminders"])
+
+    y = 115
+
+    cards = []
+
+    if weather:
+        cards.append(("WEATHER", weather))
+
+    if news:
+        cards.append(("NEWS", news[:90]))
+
+    if summary:
+        cards.append(("SUMMARY", summary[:90]))
+
+    for reminder in reminders[:3]:
+        cards.append(("REMINDER", reminder[:90]))
+
+    for title, text in cards[:4]:
+        cv2.putText(
+            frame,
+            title,
+            (22, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (0, 220, 255),
+            1,
+            cv2.LINE_AA
+        )
+
+        y += 23
+
+        lines = wrap_text(text, max_chars=42)
+
+        for line in lines[:2]:
+            cv2.putText(
+                frame,
+                line,
+                (22, y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.52,
+                (230, 230, 230),
+                1,
+                cv2.LINE_AA
+            )
+
+            y += 23
+
+        y += 13
 
 
-def draw_faces(frame):
+def hud_draw_faces(frame):
     h, w = frame.shape[:2]
 
     with state_lock:
@@ -482,33 +648,173 @@ def draw_faces(frame):
         count = face.get("seen_count", None)
 
         if known:
-            label = f"{name} | seen {count}x"
+            label = f"{name}"
+            sub_label = f"seen {count}x"
         else:
-            label = "Unknown | save from phone"
+            label = "Unknown"
+            sub_label = "save from phone"
 
         cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
 
-        label_y = max(top - 10, 30)
-        label_width = min(520, max(230, len(label) * 13))
-
-        cv2.rectangle(
-            frame,
-            (left, label_y - 28),
-            (left + label_width, label_y + 7),
-            (0, 255, 0),
-            -1
-        )
+        label_x = min(right + 12, w - 260)
+        label_y = max(top + 22, 95)
 
         cv2.putText(
             frame,
             label,
-            (left + 6, label_y),
+            (label_x, label_y),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.62,
-            (0, 0, 0),
+            0.70,
+            (255, 255, 255),
             2,
             cv2.LINE_AA
         )
+
+        cv2.putText(
+            frame,
+            sub_label,
+            (label_x, label_y + 26),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.52,
+            (180, 255, 180),
+            1,
+            cv2.LINE_AA
+        )
+
+
+def hud_draw_captions(frame):
+    with state_lock:
+        caption = state["caption"]
+        selected_language = state["selected_language"]
+
+    if not caption:
+        return
+
+    h, w = frame.shape[:2]
+
+    source_language = selected_language
+
+    lang_map = {
+        "en": "English",
+        "es": "Spanish",
+        "de": "German",
+        "ar": "Arabic",
+        "hi": "Hindi",
+        "ur": "Urdu"
+    }
+
+    prefix = ""
+
+    if source_language and source_language != "en":
+        prefix = f"({lang_map.get(source_language, source_language.upper())}) "
+
+    full_text = prefix + caption
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.78
+    thickness = 2
+
+    words = full_text.split()
+    lines = []
+    current = ""
+
+    max_width = w - 80
+
+    for word in words:
+        test_line = current + word + " "
+
+        text_size, _ = cv2.getTextSize(test_line, font, scale, thickness)
+
+        if text_size[0] > max_width and current:
+            lines.append(current.strip())
+            current = word + " "
+        else:
+            current = test_line
+
+    if current:
+        lines.append(current.strip())
+
+    lines_to_show = lines[-3:]
+
+    bg_height = len(lines_to_show) * 38 + 28
+    y_start = h - bg_height - 15
+
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (20, y_start), (w - 20, h - 15), (25, 25, 25), -1)
+    cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
+
+    y = y_start + 38
+
+    for line in lines_to_show:
+        if line.startswith("(") and ")" in line:
+            end_idx = line.find(")") + 1
+            lang_prefix = line[:end_idx]
+            rest = line[end_idx:]
+
+            cv2.putText(
+                frame,
+                lang_prefix,
+                (40, y),
+                font,
+                scale,
+                (0, 255, 255),
+                thickness,
+                cv2.LINE_AA
+            )
+
+            prefix_size, _ = cv2.getTextSize(lang_prefix, font, scale, thickness)
+
+            cv2.putText(
+                frame,
+                rest,
+                (40 + prefix_size[0], y),
+                font,
+                scale,
+                (255, 255, 255),
+                thickness,
+                cv2.LINE_AA
+            )
+
+        else:
+            cv2.putText(
+                frame,
+                line,
+                (40, y),
+                font,
+                scale,
+                (255, 255, 255),
+                thickness,
+                cv2.LINE_AA
+            )
+
+        y += 38
+
+
+def render_hud_frame(camera_frame):
+    """
+    Renders HUD on either:
+      1. camera frame background
+      2. pure black background
+    """
+
+    with state_lock:
+        mode = state["mode"]
+        use_camera_background = state["hud_camera_background"]
+
+    if use_camera_background and camera_frame is not None:
+        frame = cv2.resize(camera_frame, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
+    else:
+        frame = np.zeros((DISPLAY_HEIGHT, DISPLAY_WIDTH, 3), dtype=np.uint8)
+
+    hud_draw_clock_date(frame)
+    hud_draw_system_status(frame)
+    hud_draw_info_cards(frame)
+
+    if mode in [MODE_FACE, MODE_DUAL]:
+        hud_draw_faces(frame)
+
+    if mode in [MODE_AUDIO, MODE_DUAL]:
+        hud_draw_captions(frame)
 
     return frame
 
@@ -653,6 +959,13 @@ def camera_display_thread():
 
     last_face_send = 0
 
+    cv2.namedWindow("TrueVision", cv2.WINDOW_NORMAL)
+
+    try:
+        cv2.setWindowProperty("TrueVision", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    except Exception:
+        pass
+
     while state["running"]:
         ret, frame = cap.read()
 
@@ -661,23 +974,15 @@ def camera_display_thread():
             time.sleep(0.05)
             continue
 
-        frame = cv2.resize(frame, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
+        camera_frame = cv2.resize(frame, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
 
-        with state_lock:
-            mode = state["mode"]
-            caption = state["caption"]
+        # Always send the real camera frame to DGX for recognition,
+        # even when the display is in black HUD mode.
+        last_face_send = maybe_send_frame_to_dgx(camera_frame, last_face_send)
 
-        last_face_send = maybe_send_frame_to_dgx(frame, last_face_send)
+        hud_frame = render_hud_frame(camera_frame)
 
-        if mode in [MODE_FACE, MODE_DUAL]:
-            frame = draw_faces(frame)
-
-        if mode in [MODE_AUDIO, MODE_DUAL]:
-            frame = draw_caption(frame, caption)
-
-        frame = draw_status(frame)
-
-        cv2.imshow("TrueVision", frame)
+        cv2.imshow("TrueVision", hud_frame)
 
         key = cv2.waitKey(1) & 0xFF
 
@@ -693,7 +998,7 @@ def camera_display_thread():
             with state_lock:
                 state["mode"] = MODE_FACE
 
-        elif key == ord("d"):
+        elif key == ord("d") or key == ord("b"):
             with state_lock:
                 state["mode"] = MODE_DUAL
 
@@ -702,6 +1007,10 @@ def camera_display_thread():
 
         elif key == ord("s"):
             threading.Thread(target=fetch_summary, daemon=True).start()
+
+        elif key == ord("h"):
+            with state_lock:
+                state["hud_camera_background"] = not state["hud_camera_background"]
 
     cap.release()
     cv2.destroyAllWindows()
@@ -780,13 +1089,13 @@ def fetch_weather():
         desc = data["weather"][0]["description"]
         temp = data["main"]["temp"]
 
-        msg = f"Weather: {temp:.0f}°F, {desc}"
+        msg = f"{temp:.0f}°F, {desc}"
 
         with state_lock:
             state["weather"] = msg
-            state["caption"] = msg
+            state["caption"] = "Weather: " + msg
 
-        print("[PI]", msg)
+        print("[PI] Weather:", msg)
 
     except Exception as e:
         msg = f"Weather failed: {e}"
@@ -817,13 +1126,13 @@ def fetch_news():
         articles = data.get("articles", [])
 
         headlines = [a.get("title", "") for a in articles[:3]]
-        msg = "News: " + " | ".join(headlines)
+        msg = " | ".join(headlines)
 
         with state_lock:
             state["news"] = msg
-            state["caption"] = msg
+            state["caption"] = "News: " + msg
 
-        print("[PI]", msg)
+        print("[PI] News:", msg)
 
     except Exception as e:
         msg = f"News failed: {e}"
@@ -920,6 +1229,35 @@ def set_language_on_dgx(language: str):
         }
 
 
+def add_reminder(text: str):
+    clean = text.strip()
+
+    if not clean:
+        return {
+            "ok": False,
+            "error": "Missing reminder text"
+        }
+
+    with state_lock:
+        state["reminders"].append(clean)
+        state["reminders"] = state["reminders"][-5:]
+
+    return {
+        "ok": True,
+        "reminders": state["reminders"]
+    }
+
+
+def clear_reminders():
+    with state_lock:
+        state["reminders"] = []
+
+    return {
+        "ok": True,
+        "reminders": []
+    }
+
+
 # =========================
 # Phone Controller
 # =========================
@@ -1000,6 +1338,12 @@ CONTROL_HTML = """
 
     <hr>
 
+    <h3>HUD Background</h3>
+    <button class="gray" onclick="setHudBackground('camera')">Camera Background</button>
+    <button class="gray" onclick="setHudBackground('black')">Black HUD Background</button>
+
+    <hr>
+
     <h3>Audio Language</h3>
     <button class="gray" onclick="setLanguage('en')">English Captions</button>
     <button class="gray" onclick="setLanguage('es')">Spanish to English</button>
@@ -1023,6 +1367,13 @@ CONTROL_HTML = """
 
     <hr>
 
+    <h3>HUD Reminder</h3>
+    <input id="reminderText" placeholder="Reminder text">
+    <button class="gray" onclick="addReminder()">Add Reminder</button>
+    <button class="danger" onclick="clearReminders()">Clear Reminders</button>
+
+    <hr>
+
     <h3>Save Current Unknown Face</h3>
     <input id="newUnknownName" placeholder="Name, example Aditya">
     <button class="gray" onclick="saveUnknownFace()">Save Current Unknown</button>
@@ -1043,6 +1394,12 @@ CONTROL_HTML = """
 <script>
 async function setMode(mode) {
     const res = await fetch('/mode/' + mode, {method: 'POST'});
+    const data = await res.json();
+    document.getElementById('status').innerText = JSON.stringify(data, null, 2);
+}
+
+async function setHudBackground(mode) {
+    const res = await fetch('/hud_background/' + mode, {method: 'POST'});
     const data = await res.json();
     document.getElementById('status').innerText = JSON.stringify(data, null, 2);
 }
@@ -1082,6 +1439,30 @@ function sendLocation() {
     }, function(err) {
         document.getElementById('status').innerText = 'Location error: ' + err.message;
     });
+}
+
+async function addReminder() {
+    const text = document.getElementById('reminderText').value.trim();
+
+    if (!text) {
+        document.getElementById('status').innerText = 'Please enter reminder text';
+        return;
+    }
+
+    const res = await fetch('/reminder', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text: text})
+    });
+
+    const data = await res.json();
+    document.getElementById('status').innerText = JSON.stringify(data, null, 2);
+}
+
+async function clearReminders() {
+    const res = await fetch('/reminders/clear', {method: 'POST'});
+    const data = await res.json();
+    document.getElementById('status').innerText = JSON.stringify(data, null, 2);
 }
 
 async function saveUnknownFace() {
@@ -1161,6 +1542,34 @@ def set_mode(mode_name: str):
     }
 
 
+@phone_app.post("/hud_background/{background_mode}")
+def set_hud_background(background_mode: str):
+    if background_mode == "camera":
+        with state_lock:
+            state["hud_camera_background"] = True
+
+        return {
+            "ok": True,
+            "hud_camera_background": True,
+            "mode": "camera"
+        }
+
+    if background_mode == "black":
+        with state_lock:
+            state["hud_camera_background"] = False
+
+        return {
+            "ok": True,
+            "hud_camera_background": False,
+            "mode": "black"
+        }
+
+    return {
+        "ok": False,
+        "error": "Unknown HUD background mode. Use camera or black."
+    }
+
+
 @phone_app.post("/language/{language}")
 def set_language(language: str):
     result = set_language_on_dgx(language)
@@ -1213,6 +1622,17 @@ def update_location(payload: Dict[str, float]):
     }
 
 
+@phone_app.post("/reminder")
+def add_reminder_route(payload: Dict[str, str]):
+    text = payload.get("text", "")
+    return add_reminder(text)
+
+
+@phone_app.post("/reminders/clear")
+def clear_reminders_route():
+    return clear_reminders()
+
+
 @phone_app.post("/rename_face")
 def rename_face(payload: Dict[str, str]):
     old_name = payload.get("old_name", "").strip()
@@ -1260,6 +1680,8 @@ def get_state():
             "weather": state["weather"],
             "news": state["news"],
             "location": state["location"],
+            "hud_camera_background": state["hud_camera_background"],
+            "reminders": state["reminders"],
             "uart_connected": state["uart_connected"],
             "dgx_audio_connected": state["dgx_audio_connected"],
             "dgx_face_connected": state["dgx_face_connected"],
