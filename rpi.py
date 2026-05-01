@@ -39,12 +39,12 @@ SAMPLE_WIDTH_BYTES = 2
 AUDIO_CHUNK_SECONDS = 2.5
 AUDIO_CHUNK_BYTES = int(SAMPLE_RATE * SAMPLE_WIDTH_BYTES * AUDIO_CHUNK_SECONDS)
 
-# Smaller face frame because HUD/display is now 640x480
+# Smaller frame sent to DGX because display is 640x480
 FACE_SEND_INTERVAL_SECONDS = 0.35
 FACE_SEND_WIDTH = 320
 JPEG_QUALITY = 70
 
-# AR optic target resolution
+# AR optic render target
 DISPLAY_WIDTH = 640
 DISPLAY_HEIGHT = 480
 
@@ -452,7 +452,6 @@ def hud_draw_system_status(frame):
         face_connected = state["dgx_face_connected"]
         selected_language = state["selected_language"]
         last_language = state["last_language"]
-        task = state["last_task"]
         hud_camera_background = state["hud_camera_background"]
 
     mode_name = MODE_NAMES.get(mode, "UNKNOWN")
@@ -787,9 +786,9 @@ def hud_draw_captions(frame):
 
 def render_hud_frame(camera_frame):
     """
-    Renders HUD on either:
+    Render HUD on either:
       1. camera frame background
-      2. pure black background
+      2. black background
     """
 
     with state_lock:
@@ -954,10 +953,19 @@ def camera_display_thread():
 
     last_face_send = 0
 
-    # Important: no fullscreen, exact AR optic resolution.
+    # Fullscreen output for AR optic.
+    # The HUD frame itself is rendered at 640x480.
     cv2.namedWindow("TrueVision", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("TrueVision", DISPLAY_WIDTH, DISPLAY_HEIGHT)
     cv2.moveWindow("TrueVision", 0, 0)
+
+    try:
+        cv2.setWindowProperty(
+            "TrueVision",
+            cv2.WND_PROP_FULLSCREEN,
+            cv2.WINDOW_FULLSCREEN
+        )
+    except Exception as e:
+        print("[PI] Could not enable fullscreen:", e)
 
     while state["running"]:
         ret, frame = cap.read()
@@ -969,8 +977,8 @@ def camera_display_thread():
 
         camera_frame = cv2.resize(frame, (DISPLAY_WIDTH, DISPLAY_HEIGHT))
 
-        # Always send the real camera frame to DGX for recognition,
-        # even when display is black HUD mode.
+        # Always send real camera frame to DGX for recognition,
+        # even if display is black HUD mode.
         last_face_send = maybe_send_frame_to_dgx(camera_frame, last_face_send)
 
         hud_frame = render_hud_frame(camera_frame)
