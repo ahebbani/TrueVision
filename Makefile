@@ -5,19 +5,28 @@ SERVER_VENV ?= .venv-server
 UVICORN_HOST ?= 0.0.0.0
 UVICORN_PORT ?= 8008
 
-PI_PYTHON := $(if $(wildcard $(PI_VENV)/bin/python),$(PI_VENV)/bin/python,python3)
-SERVER_PYTHON := $(if $(wildcard $(SERVER_VENV)/bin/python),$(SERVER_VENV)/bin/python,python3)
+PI_VENV_ABS := $(abspath $(PI_VENV))
+SERVER_VENV_ABS := $(abspath $(SERVER_VENV))
+
 
 .PHONY: run run-server setup-pi setup-server
 
 run:
-	$(PI_PYTHON) rpi.py
+	@if [ ! -x "$(PI_VENV_ABS)/bin/python" ]; then \
+		echo "[make] Pi virtual environment missing at $(PI_VENV_ABS). Run 'make setup-pi' first."; \
+		exit 1; \
+	fi
+	. "$(PI_VENV_ABS)/bin/activate" && python rpi.py
 
 run-server:
-	$(SERVER_PYTHON) -m uvicorn server:app --host $(UVICORN_HOST) --port $(UVICORN_PORT)
+	@if [ ! -x "$(SERVER_VENV_ABS)/bin/python" ]; then \
+		echo "[make] Server virtual environment missing at $(SERVER_VENV_ABS). Run 'make setup-server' first."; \
+		exit 1; \
+	fi
+	. "$(SERVER_VENV_ABS)/bin/activate" && python -m uvicorn server:app --host $(UVICORN_HOST) --port $(UVICORN_PORT)
 
 setup-pi:
-	bash setup-pi.sh
+	PI_VENV_DIR="$(PI_VENV_ABS)" bash setup-pi.sh
 
 setup-server:
-	bash setup-server.sh
+	SERVER_VENV_DIR="$(SERVER_VENV_ABS)" bash setup-server.sh
