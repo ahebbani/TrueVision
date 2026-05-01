@@ -18,7 +18,7 @@ echo "[setup-server] Rebuilding virtual environment at $VENV_DIR"
   "uvicorn[standard]" \
     faster-whisper
 "$VENV_DIR/bin/python" -m pip install --upgrade --force-reinstall \
-    face-recognition-models \
+    "git+https://github.com/ageitgey/face_recognition_models" \
     face-recognition
 
 "$VENV_DIR/bin/python" - <<'PY'
@@ -40,7 +40,7 @@ missing = []
 for name in required:
     try:
         importlib.import_module(name)
-    except Exception:
+    except BaseException:
         missing.append(name)
 
 if missing:
