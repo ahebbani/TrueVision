@@ -1107,13 +1107,34 @@ def camera_display_thread():
 # Shell / Window Helpers
 # =========================
 
+def desktop_env():
+    env = os.environ.copy()
+
+    env.setdefault("DISPLAY", ":0")
+
+    home = os.path.expanduser("~")
+    xauth = os.path.join(home, ".Xauthority")
+
+    if os.path.exists(xauth):
+        env.setdefault("XAUTHORITY", xauth)
+
+    return env
+
+
 def run_shell(cmd: List[str]):
     try:
-        subprocess.Popen(cmd)
+        subprocess.Popen(
+            cmd,
+            env=desktop_env(),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+
         return {
             "ok": True,
             "cmd": cmd
         }
+
     except Exception as e:
         return {
             "ok": False,
@@ -1126,6 +1147,7 @@ def run_shell_wait(cmd: List[str], timeout: int = 5):
     try:
         result = subprocess.run(
             cmd,
+            env=desktop_env(),
             capture_output=True,
             text=True,
             timeout=timeout
@@ -1147,6 +1169,22 @@ def run_shell_wait(cmd: List[str], timeout: int = 5):
         }
 
 
+def get_browser_cmd():
+    candidates = [
+        "chromium-browser",
+        "chromium",
+        "google-chrome"
+    ]
+
+    for candidate in candidates:
+        result = run_shell_wait(["which", candidate], timeout=2)
+
+        if result.get("ok") and result.get("stdout", "").strip():
+            return candidate
+
+    return None
+
+
 def focus_window_by_class(window_class: str):
     result = run_shell_wait(
         ["xdotool", "search", "--class", window_class],
@@ -1163,21 +1201,36 @@ def focus_window_by_class(window_class: str):
     window_ids = result["stdout"].strip().splitlines()
     target = window_ids[-1]
 
-    return run_shell(["xdotool", "windowactivate", target])
+    return run_shell([
+        "xdotool",
+        "windowactivate",
+        "--sync",
+        target
+    ])
 
 
 def focus_chromium():
-    result = focus_window_by_class("chromium")
+    classes = [
+        "chromium",
+        "Chromium",
+        "chrome",
+        "Google-chrome"
+    ]
 
-    if result.get("ok"):
-        return result
+    last_result = None
 
-    result = focus_window_by_class("Chromium")
+    for cls in classes:
+        result = focus_window_by_class(cls)
+        last_result = result
 
-    if result.get("ok"):
-        return result
+        if result.get("ok"):
+            return result
 
-    return focus_window_by_class("chrome")
+    return {
+        "ok": False,
+        "error": "Could not focus Chromium/Chrome",
+        "last_result": last_result
+    }
 
 
 def focus_truevision():
@@ -1196,7 +1249,12 @@ def focus_truevision():
     window_ids = result["stdout"].strip().splitlines()
     target = window_ids[-1]
 
-    return run_shell(["xdotool", "windowactivate", target])
+    return run_shell([
+        "xdotool",
+        "windowactivate",
+        "--sync",
+        target
+    ])
 
 
 def minimize_truevision():
@@ -1208,26 +1266,31 @@ def minimize_truevision():
     if result.get("ok") and result.get("stdout", "").strip():
         window_ids = result["stdout"].strip().splitlines()
         target = window_ids[-1]
-        return run_shell(["xdotool", "windowminimize", target])
+
+        return run_shell([
+            "xdotool",
+            "windowminimize",
+            target
+        ])
 
     return {
         "ok": False,
-        "error": "TrueVision window not found"
+        "error": "TrueVision window not found",
+        "details": result
     }
 
 
 # =========================
-# Mouse / Joystick Control
+# Mouse / Circular Joystick Control
 # =========================
 
 def mouse_move(dx: int, dy: int):
-    dx = max(-120, min(120, int(dx)))
-    dy = max(-120, min(120, int(dy)))
+    dx = max(-80, min(80, int(dx)))
+    dy = max(-80, min(80, int(dy)))
 
     return run_shell([
         "xdotool",
         "mousemove_relative",
-        "--sync",
         "--",
         str(dx),
         str(dy)
@@ -1273,33 +1336,44 @@ def mouse_drag_end():
 # =========================
 
 def open_browser_url(url: str):
-    # Hide HUD first so Chromium is visible on the optic.
-    minimize_truevision()
+    browser = get_browser_cmd()
 
-    try:
-        subprocess.Popen([
-            "chromium-browser",
-            "--new-window",
-            "--start-maximized",
-            url
-        ])
-
-        time.sleep(1.5)
-        focus_chromium()
+    if not browser:
+        with state_lock:
+            state["caption"] = "Could not find Chromium browser"
 
         return {
-            "ok": True,
-            "url": url
+            "ok": False,
+            "error": "Could not find chromium-browser or chromium. Try: sudo apt install chromium-browser"
         }
 
-    except Exception as e:
-        webbrowser.open(url)
+    with state_lock:
+        state["caption"] = "Opening browser..."
 
-        return {
-            "ok": True,
-            "url": url,
-            "fallback": str(e)
-        }
+    launch_result = run_shell([
+        browser,
+        "--new-window",
+        "--start-maximized",
+        url
+    ])
+
+    time.sleep(2.0)
+
+    focus_result = focus_chromium()
+    minimize_result = minimize_truevision()
+
+    time.sleep(0.3)
+    focus_result_2 = focus_chromium()
+
+    return {
+        "ok": True,
+        "url": url,
+        "browser": browser,
+        "launch": launch_result,
+        "focus": focus_result,
+        "minimize_hud": minimize_result,
+        "focus_after_minimize": focus_result_2
+    }
 
 
 def open_youtube_search(query: str):
@@ -1743,19 +1817,30 @@ CONTROL_HTML = """
             padding-top: 14px;
         }
 
-        .joy {
-            height: 74px;
-            font-size: 30px;
+        #joystickBase {
+            width: 240px;
+            height: 240px;
+            margin: 18px auto;
+            border-radius: 50%;
+            background: radial-gradient(circle, #1e293b 0%, #020617 70%);
+            border: 3px solid #475569;
+            position: relative;
             touch-action: none;
             user-select: none;
+            box-shadow: 0 0 18px rgba(14, 165, 233, 0.35);
         }
 
-        .joystick-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr 1fr;
-            gap: 8px;
-            width: 94%;
-            margin: auto;
+        #joystickKnob {
+            width: 76px;
+            height: 76px;
+            border-radius: 50%;
+            background: #0ea5e9;
+            border: 3px solid #bae6fd;
+            position: absolute;
+            left: 82px;
+            top: 82px;
+            box-shadow: 0 0 18px rgba(14, 165, 233, 0.75);
+            transition: left 0.04s linear, top 0.04s linear;
         }
     </style>
 </head>
@@ -1811,19 +1896,11 @@ CONTROL_HTML = """
     <div class="section">
         <h3>Cursor Joystick</h3>
 
-        <div class="joystick-grid">
-            <div></div>
-            <button class="nav joy" data-dx="0" data-dy="-28">▲</button>
-            <div></div>
-
-            <button class="nav joy" data-dx="-28" data-dy="0">◀</button>
-            <button class="gray" onclick="mouseClick(1)">Click</button>
-            <button class="nav joy" data-dx="28" data-dy="0">▶</button>
-
-            <div></div>
-            <button class="nav joy" data-dx="0" data-dy="28">▼</button>
-            <div></div>
+        <div id="joystickBase">
+            <div id="joystickKnob"></div>
         </div>
+
+        <div class="small">Drag the circle to move the cursor</div>
 
         <button class="gray" onclick="mouseClick(1)">Left Click</button>
         <button class="gray" onclick="mouseClick(3)">Right Click</button>
@@ -1874,8 +1951,9 @@ CONTROL_HTML = """
 
 <script>
 let joystickTimer = null;
-let joystickDx = 0;
-let joystickDy = 0;
+let joystickActive = false;
+let joystickMoveX = 0;
+let joystickMoveY = 0;
 
 async function setMode(mode) {
     const res = await fetch('/mode/' + mode, {method: 'POST'});
@@ -1978,61 +2056,155 @@ async function mouseMove(dx, dy) {
     });
 }
 
-function startJoystick(dx, dy) {
-    stopJoystick();
+function resetJoystickKnob() {
+    const knob = document.getElementById('joystickKnob');
 
-    joystickDx = dx;
-    joystickDy = dy;
+    if (!knob) {
+        return;
+    }
 
-    mouseMove(joystickDx, joystickDy);
-
-    joystickTimer = setInterval(function() {
-        mouseMove(joystickDx, joystickDy);
-    }, 70);
+    knob.style.left = '82px';
+    knob.style.top = '82px';
 }
 
 function stopJoystick() {
+    joystickActive = false;
+    joystickMoveX = 0;
+    joystickMoveY = 0;
+
     if (joystickTimer !== null) {
         clearInterval(joystickTimer);
         joystickTimer = null;
     }
+
+    resetJoystickKnob();
+}
+
+function updateJoystickFromPoint(clientX, clientY) {
+    const base = document.getElementById('joystickBase');
+    const knob = document.getElementById('joystickKnob');
+
+    if (!base || !knob) {
+        return;
+    }
+
+    const rect = base.getBoundingClientRect();
+
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+
+    let dx = clientX - centerX;
+    let dy = clientY - centerY;
+
+    const maxRadius = rect.width / 2 - 42;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+
+    if (distance > maxRadius) {
+        dx = dx / distance * maxRadius;
+        dy = dy / distance * maxRadius;
+    }
+
+    const knobCenterX = rect.width / 2 + dx;
+    const knobCenterY = rect.height / 2 + dy;
+
+    knob.style.left = `${knobCenterX - 38}px`;
+    knob.style.top = `${knobCenterY - 38}px`;
+
+    const normalizedX = dx / maxRadius;
+    const normalizedY = dy / maxRadius;
+
+    const maxSpeed = 34;
+
+    joystickMoveX = Math.round(normalizedX * maxSpeed);
+    joystickMoveY = Math.round(normalizedY * maxSpeed);
+}
+
+function startJoystickLoop() {
+    if (joystickTimer !== null) {
+        return;
+    }
+
+    joystickTimer = setInterval(function() {
+        if (!joystickActive) {
+            return;
+        }
+
+        if (joystickMoveX !== 0 || joystickMoveY !== 0) {
+            mouseMove(joystickMoveX, joystickMoveY);
+        }
+    }, 45);
 }
 
 function setupJoystick() {
-    const buttons = document.querySelectorAll('.joy');
+    const base = document.getElementById('joystickBase');
 
-    buttons.forEach(function(btn) {
-        const dx = parseInt(btn.getAttribute('data-dx'));
-        const dy = parseInt(btn.getAttribute('data-dy'));
+    if (!base) {
+        return;
+    }
 
-        btn.addEventListener('touchstart', function(e) {
-            e.preventDefault();
-            startJoystick(dx, dy);
-        }, {passive: false});
+    base.addEventListener('touchstart', function(e) {
+        e.preventDefault();
 
-        btn.addEventListener('touchend', function(e) {
-            e.preventDefault();
-            stopJoystick();
-        }, {passive: false});
+        joystickActive = true;
 
-        btn.addEventListener('touchcancel', function(e) {
-            e.preventDefault();
-            stopJoystick();
-        }, {passive: false});
+        if (e.touches.length > 0) {
+            updateJoystickFromPoint(
+                e.touches[0].clientX,
+                e.touches[0].clientY
+            );
+        }
 
-        btn.addEventListener('mousedown', function(e) {
-            e.preventDefault();
-            startJoystick(dx, dy);
-        });
+        startJoystickLoop();
+    }, {passive: false});
 
-        btn.addEventListener('mouseup', function(e) {
-            e.preventDefault();
-            stopJoystick();
-        });
+    base.addEventListener('touchmove', function(e) {
+        e.preventDefault();
 
-        btn.addEventListener('mouseleave', function(e) {
-            stopJoystick();
-        });
+        if (!joystickActive) {
+            return;
+        }
+
+        if (e.touches.length > 0) {
+            updateJoystickFromPoint(
+                e.touches[0].clientX,
+                e.touches[0].clientY
+            );
+        }
+    }, {passive: false});
+
+    base.addEventListener('touchend', function(e) {
+        e.preventDefault();
+        stopJoystick();
+    }, {passive: false});
+
+    base.addEventListener('touchcancel', function(e) {
+        e.preventDefault();
+        stopJoystick();
+    }, {passive: false});
+
+    base.addEventListener('mousedown', function(e) {
+        e.preventDefault();
+
+        joystickActive = true;
+
+        updateJoystickFromPoint(e.clientX, e.clientY);
+        startJoystickLoop();
+    });
+
+    window.addEventListener('mousemove', function(e) {
+        if (!joystickActive) {
+            return;
+        }
+
+        updateJoystickFromPoint(e.clientX, e.clientY);
+    });
+
+    window.addEventListener('mouseup', function(e) {
+        if (!joystickActive) {
+            return;
+        }
+
+        stopJoystick();
     });
 }
 
